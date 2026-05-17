@@ -1,0 +1,40 @@
+#!/usr/bin/env stryke
+# examples/get.stk — list pods / services / deployments across namespaces.
+# Run:   s examples/get.stk
+
+use K8s
+
+p "context: " . K8s::current_context()
+p "version: " . K8s::version()->{gitVersion}
+
+p ""
+p "── namespaces"
+for my $ns (K8s::namespaces()) {
+    p sprintf("  %-30s %s", $ns->{name}, $ns->{status})
+}
+
+p ""
+p "── pods (all namespaces, first 20)"
+my @pods = K8s::get("pods", all_namespaces => 1, limit => 20)
+for my $pod (@pods) {
+    my $phase = $pod->{status}{phase} // "?"
+    my $name  = $pod->{metadata}{name}
+    my $ns    = $pod->{metadata}{namespace}
+    p sprintf("  %-15s %-50s %s", $ns, $name, $phase)
+}
+
+p ""
+p "── services in kube-system"
+for my $svc (K8s::get("svc", namespace => "kube-system")) {
+    my $type = $svc->{spec}{type} // "?"
+    my $ip   = $svc->{spec}{clusterIP} // "-"
+    p sprintf("  %-30s %-12s %s", $svc->{metadata}{name}, $type, $ip)
+}
+
+p ""
+p "── deployments by label app=*"
+for my $d (K8s::get("deploy", all_namespaces => 1, label_selector => "app")) {
+    my $want = $d->{spec}{replicas} // 0
+    my $have = $d->{status}{readyReplicas} // 0
+    p sprintf("  %-15s %-30s %d/%d ready", $d->{metadata}{namespace}, $d->{metadata}{name}, $have, $want)
+}

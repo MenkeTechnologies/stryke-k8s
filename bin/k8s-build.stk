@@ -1,0 +1,8 @@
+#!/usr/bin/env stryke
+my @_p = split "/", __FILE__
+pop @_p
+pop @_p
+require join("/", @_p) . "/lib/K8s.stk"
+
+my $path = K8s::ensure_built()
+p "stryke-k8s: helper ready at $path"

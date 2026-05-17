@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --locked
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    env:
+      RUST_BACKTRACE: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --no-fail-fast
+
+  helper-live-k8s:
+    name: Helper end-to-end (kind)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: stryke-ci
+          wait: 120s
+
+      - run: cargo build --release --locked
+
+      - name: ping + apply + scale + get
+        run: |
+          set -euo pipefail
+          H=./target/release/stryke-k8s-helper
+
+          $H ping | jq -e '.ok == true'
+          $H version | jq -e '.gitVersion'
+
+          # Namespace
+          $H apply --doc='{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"ci"}}' \
+            | jq -e '.metadata.name == "ci"'
+
+          # ConfigMap
+          $H apply --doc='{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cfg","namespace":"ci"},"data":{"a":"1"}}' \
+            | jq -e '.data.a == "1"'
+
+          # Deployment
+          $H apply --doc='{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"echo","namespace":"ci"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"echo"}},"template":{"metadata":{"labels":{"app":"echo"}},"spec":{"containers":[{"name":"main","image":"hashicorp/http-echo:latest","args":["-text=hi"]}]}}}}' \
+            | jq -e '.metadata.name == "echo"'
+
+          # Scale
+          $H scale deploy echo --replicas=2 --namespace=ci \
+            | jq -e '.spec.replicas == 2'
+
+          # List + get-one
+          $H get cm --namespace=ci | jq -es 'map(.metadata.name) | index("cfg") != null'
+          $H get-one cm cfg --namespace=ci | jq -e '.data.a == "1"'
+
+          # api-resources + namespaces
+          $H api-resources | grep -q '"kind":"Pod"'
+          $H namespaces | grep -q '"name":"ci"'
+
+          # Cleanup
+          $H delete namespace ci | jq -e '.status'
+
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
+
+  release-build:
+    name: Release Build (${{ matrix.target }})
+    needs: [check, test, helper-live-k8s]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stryke-k8s-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/stryke-k8s-helper

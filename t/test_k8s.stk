@@ -1,0 +1,132 @@
+# t/test_k8s.stk — round-trip against a live Kubernetes cluster.
+#
+# Skips when the helper isn't built or no cluster is reachable. Local dev:
+#   kind create cluster --name stryke
+#   docker run --rm -v $PWD/k3s:/output rancher/k3s:latest server --disable=traefik
+#
+# Uses a unique namespace `stryke-test-$$` and tears it down at exit.
+
+require "./lib/K8s.stk"
+
+my $have_helper = eval { K8s::helper_path(); 1 }
+unless ($have_helper) {
+    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+    exit 0
+}
+
+unless (K8s::ping()) {
+    p "1..0 # SKIP no reachable cluster (check KUBECONFIG / current-context)"
+    exit 0
+}
+
+my $ns = "stryke-test-$$"
+p "1..9"
+my $i = 0
+
+# 1. apply Namespace
+my $r
+eval {
+    $r = K8s::apply({
+        apiVersion => "v1",
+        kind       => "Namespace",
+        metadata   => { name => $ns, labels => { "stryke.io/test" => "1" } },
+    })
+}
+$i++
+p $@ ? "not ok $i - apply ns: $@" :
+       (defined $r->{metadata}{name} && $r->{metadata}{name} eq $ns
+            ? "ok $i - apply Namespace"
+            : "not ok $i - apply ns wrong shape")
+
+# 2. version
+my $v
+eval { $v = K8s::version() }
+$i++
+p $@ ? "not ok $i - version: $@" :
+       (defined $v->{gitVersion} ? "ok $i - version $v->{gitVersion}" : "not ok $i - version shape")
+
+# 3. apply ConfigMap
+eval {
+    $r = K8s::apply({
+        apiVersion => "v1",
+        kind       => "ConfigMap",
+        metadata   => { name => "cfg", namespace => $ns },
+        data       => { hello => "world", lang => "stryke" },
+    })
+}
+$i++
+p $@ ? "not ok $i - apply cm: $@" :
+       (defined $r->{data}{hello} && $r->{data}{hello} eq "world"
+            ? "ok $i - apply ConfigMap"
+            : "not ok $i - cm data wrong")
+
+# 4. get configmaps (list)
+my @cms
+eval { @cms = K8s::get("configmaps", namespace => $ns) }
+$i++
+p $@ ? "not ok $i - get cm: $@" :
+       (grep { $_->{metadata}{name} eq "cfg" } @cms
+            ? "ok $i - get configmaps (#{len(@cms)} item(s))"
+            : "not ok $i - get cm: cfg missing")
+
+# 5. get-one configmap
+my $one
+eval { $one = K8s::get_one("configmaps", "cfg", namespace => $ns) }
+$i++
+p $@ ? "not ok $i - get-one cm: $@" :
+       (defined $one && $one->{data}{lang} eq "stryke"
+            ? "ok $i - get-one ConfigMap"
+            : "not ok $i - get-one wrong")
+
+# 6. apply Deployment (busybox sleep, replicas=1)
+eval {
+    $r = K8s::apply({
+        apiVersion => "apps/v1",
+        kind       => "Deployment",
+        metadata   => { name => "sleeper", namespace => $ns },
+        spec       => {
+            replicas => 1,
+            selector => { matchLabels => { app => "sleeper" } },
+            template => {
+                metadata => { labels => { app => "sleeper" } },
+                spec     => {
+                    containers => [{
+                        name    => "main",
+                        image   => "busybox:latest",
+                        command => ["sh", "-c", "sleep 3600"],
+                    }],
+                },
+            },
+        },
+    })
+}
+$i++
+p $@ ? "not ok $i - apply deploy: $@" :
+       (defined $r->{metadata}{name}
+            ? "ok $i - apply Deployment"
+            : "not ok $i - deploy wrong shape")
+
+# 7. scale Deployment to 2
+eval { $r = K8s::scale("deploy", "sleeper", 2, namespace => $ns) }
+$i++
+p $@ ? "not ok $i - scale: $@" :
+       (defined $r->{spec}{replicas} && $r->{spec}{replicas} == 2
+            ? "ok $i - scale to 2"
+            : "not ok $i - scale wrong: " . to_json($r))
+
+# 8. api_resources includes core/v1/Pod
+my @ar
+eval { @ar = K8s::api_resources() }
+$i++
+p $@ ? "not ok $i - api-resources: $@" :
+       (grep { $_->{kind} eq "Pod" && $_->{version} eq "v1" } @ar
+            ? "ok $i - api-resources Pod present"
+            : "not ok $i - api-resources missing Pod")
+
+# 9. delete Namespace (cascades everything)
+eval { $r = K8s::delete_resource("namespace", $ns) }
+$i++
+p $@ ? "not ok $i - delete ns: $@" :
+       ($r->{status} =~ /Deleting|Done/
+            ? "ok $i - delete Namespace ($r->{status})"
+            : "not ok $i - delete ns: " . to_json($r))

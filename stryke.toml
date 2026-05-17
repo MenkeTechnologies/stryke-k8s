@@ -1,0 +1,19 @@
+[package]
+name = "k8s"
+version = "0.1.0"
+description = "Kubernetes client for stryke. Get / apply / delete / scale / logs / watch / exec against any kubeconfig-reachable cluster."
+authors = ["MenkeTechnologies"]
+license = "MIT"
+repository = "https://github.com/MenkeTechnologies/stryke-k8s"
+edition = "2026"
+
+[bin]
+k8s = "bin/k8s.stk"
+k8s-build = "bin/k8s-build.stk"
+
+[scripts]
+build = "cargo build --release"
+build-debug = "cargo build"
+clean = "cargo clean"
+test = "s test t/"
+install = "s pkg install -g ."
