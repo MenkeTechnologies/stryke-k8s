@@ -364,15 +364,48 @@ async fn resolve_kind(client: &Client, raw: &str) -> Result<(ApiResource, Scope)
     }
 
     let lower = raw.to_lowercase();
+    let normalised = expand_shortname(&lower).unwrap_or(&lower);
     let discovery = Discovery::new(client.clone()).run().await?;
     for group in discovery.groups() {
         for (ar, caps) in group.recommended_resources() {
-            if matches(&ar, &lower) {
+            if matches(&ar, normalised) {
                 return Ok((ar, caps.scope));
             }
         }
     }
     bail!("could not resolve kind `{raw}` against cluster api-resources")
+}
+
+/// Standard kubectl short names → canonical plural form.
+fn expand_shortname(s: &str) -> Option<&'static str> {
+    match s {
+        "po"      => Some("pods"),
+        "svc"     => Some("services"),
+        "deploy"  => Some("deployments"),
+        "rs"      => Some("replicasets"),
+        "ds"      => Some("daemonsets"),
+        "sts"     => Some("statefulsets"),
+        "cm"      => Some("configmaps"),
+        "ns"      => Some("namespaces"),
+        "no"      => Some("nodes"),
+        "ing"     => Some("ingresses"),
+        "ep"      => Some("endpoints"),
+        "ev"      => Some("events"),
+        "pv"      => Some("persistentvolumes"),
+        "pvc"     => Some("persistentvolumeclaims"),
+        "sa"      => Some("serviceaccounts"),
+        "pdb"     => Some("poddisruptionbudgets"),
+        "hpa"     => Some("horizontalpodautoscalers"),
+        "crd"     => Some("customresourcedefinitions"),
+        "cs"      => Some("componentstatuses"),
+        "limits"  => Some("limitranges"),
+        "quota"   => Some("resourcequotas"),
+        "netpol"  => Some("networkpolicies"),
+        "pc"      => Some("priorityclasses"),
+        "sc"      => Some("storageclasses"),
+        "cj"      => Some("cronjobs"),
+        _         => None,
+    }
 }
 
 fn matches(ar: &ApiResource, lower: &str) -> bool {
