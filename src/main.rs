@@ -6,7 +6,7 @@
 //! Resolves unknown kinds through the cluster's discovery API.
 
 use std::collections::BTreeMap;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -17,7 +17,6 @@ use kube::api::{
     Patch, PatchParams, PostParams, ResourceExt,
 };
 use kube::config::{KubeConfigOptions, Kubeconfig};
-use kube::core::params::WatchParams;
 use kube::core::{ApiResource, GroupVersion};
 use kube::discovery::{verbs, Discovery, Scope};
 use kube::runtime::watcher;
@@ -521,7 +520,8 @@ async fn cmd_apply(
         .get("metadata")
         .and_then(|m| m.get("name"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("doc.metadata.name is required for apply"))?;
+        .ok_or_else(|| anyhow!("doc.metadata.name is required for apply"))?
+        .to_string();
     let ns = body
         .get("metadata")
         .and_then(|m| m.get("namespace"))
@@ -534,7 +534,7 @@ async fn cmd_apply(
         pp = pp.force();
     }
     let patch: DynamicObject = serde_json::from_value(body).context("doc → DynamicObject")?;
-    let res = api.patch(name, &pp, &Patch::Apply(&patch)).await.context("apply")?;
+    let res = api.patch(&name, &pp, &Patch::Apply(&patch)).await.context("apply")?;
     emit_json(&res)
 }
 
@@ -678,16 +678,16 @@ async fn cmd_watch(
 ) -> Result<()> {
     let (ar, scope) = resolve_kind(client, kind).await?;
     let api = api(client, &ar, &scope, namespace, false);
-    let mut wp = WatchParams::default();
+    let mut wc = watcher::Config::default();
     if let Some(ls) = label_selector {
-        wp = wp.labels(ls);
+        wc = wc.labels(ls);
     }
     if let Some(fs) = field_selector {
-        wp = wp.fields(fs);
+        wc = wc.fields(fs);
     }
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
-    let mut stream = watcher(api, watcher::Config::default()).boxed();
+    let mut stream = watcher(api, wc).boxed();
     while let Some(ev) = stream.try_next().await.context("watcher")? {
         match ev {
             watcher::Event::Apply(obj) => {
@@ -728,26 +728,27 @@ async fn cmd_exec(
     use tokio::io::AsyncReadExt;
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
-    let mut buf = [0u8; 8192];
+    let mut obuf = [0u8; 8192];
+    let mut ebuf = [0u8; 8192];
 
     loop {
         tokio::select! {
-            n = stdout_stream.read(&mut buf) => {
+            n = stdout_stream.read(&mut obuf) => {
                 let n = n.context("exec stdout")?;
                 if n == 0 { break; }
-                emit_ndjson(&mut out, &json!({ "stream": "stdout", "data": String::from_utf8_lossy(&buf[..n]) }))?;
+                emit_ndjson(&mut out, &json!({ "stream": "stdout", "data": String::from_utf8_lossy(&obuf[..n]) }))?;
                 out.flush().ok();
             }
             n = async {
                 if let Some(s) = stderr_stream.as_mut() {
-                    s.read(&mut buf).await
+                    s.read(&mut ebuf).await
                 } else {
                     futures_util::future::pending().await
                 }
             } => {
                 let n = n.context("exec stderr")?;
                 if n == 0 { continue; }
-                emit_ndjson(&mut out, &json!({ "stream": "stderr", "data": String::from_utf8_lossy(&buf[..n]) }))?;
+                emit_ndjson(&mut out, &json!({ "stream": "stderr", "data": String::from_utf8_lossy(&ebuf[..n]) }))?;
                 out.flush().ok();
             }
         }
