@@ -1,12 +1,46 @@
-# stryke-k8s
+```
+ ███████╗████████╗██████╗ ██╗   ██╗██╗  ██╗███████╗
+ ██╔════╝╚══██╔══╝██╔══██╗╚██╗ ██╔╝██║ ██╔╝██╔════╝
+ ███████╗   ██║   ██████╔╝ ╚████╔╝ █████╔╝ █████╗
+ ╚════██║   ██║   ██╔══██╗  ╚██╔╝  ██╔═██╗ ██╔══╝
+ ███████║   ██║   ██║  ██║   ██║   ██║  ██╗███████╗
+ ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
+                   [ k 8 s ]
+```
+
+[![CI](https://github.com/MenkeTechnologies/stryke-k8s/actions/workflows/ci.yml/badge.svg)](https://github.com/MenkeTechnologies/stryke-k8s/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![stryke](https://img.shields.io/badge/stryke-package-cyan.svg)](https://github.com/MenkeTechnologies/strykelang)
+
+### `[KUBERNETES CLIENT FOR STRYKE // GET + APPLY + DELETE + SCALE + LOGS + WATCH + EXEC]`
+
+> *"Any kubeconfig-reachable cluster, no kubectl."*
 
 Kubernetes client for stryke. Get / apply / delete / scale / logs /
 watch / exec against any kubeconfig-reachable cluster (kind, k3s,
 minikube, EKS, GKE, AKS, OpenShift, vanilla). Opt-in package tier.
 
-Created by MenkeTechnologies.
+### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-docker`](https://github.com/MenkeTechnologies/stryke-docker) · [`stryke-aws`](https://github.com/MenkeTechnologies/stryke-aws) · [`stryke-gcp`](https://github.com/MenkeTechnologies/stryke-gcp) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
-## Install
+---
+
+## Table of Contents
+
+- [\[0x00\] Install](#0x00-install)
+- [\[0x01\] Quick start](#0x01-quick-start)
+- [\[0x02\] CLI: `k8s`](#0x02-cli-k8s)
+- [\[0x03\] GVK shortcuts](#0x03-gvk-shortcuts)
+- [\[0x04\] API reference](#0x04-api-reference)
+- [\[0x05\] Helper protocol](#0x05-helper-protocol)
+- [\[0x06\] Tests](#0x06-tests)
+- [\[0x07\] Dev workflow](#0x07-dev-workflow)
+- [\[0x08\] Layout](#0x08-layout)
+- [\[0x09\] Roadmap](#0x09-roadmap)
+- [\[0xFF\] License](#0xff-license)
+
+---
+
+## [0x00] Install
 
 ```sh
 cd ~/projects/stryke-k8s
@@ -20,7 +54,7 @@ Or:
 make install
 ```
 
-## Quick start
+## [0x01] Quick start
 
 ```stryke
 use K8s
@@ -101,7 +135,7 @@ my %prod = (context => "prod-eks", kubeconfig => "/etc/k8s/prod.yaml")
 K8s::get "pods", namespace => "payments", %prod
 ```
 
-## CLI: `k8s`
+## [0x02] CLI: `k8s`
 
 ```sh
 k8s get pods --namespace=default
@@ -136,7 +170,7 @@ Global flags (also env vars):
 --default-namespace NS      $KUBE_NAMESPACE     default if --namespace omitted
 ```
 
-## GVK shortcuts
+## [0x03] GVK shortcuts
 
 Anywhere a `kind` is accepted, the helper resolves the input against the
 cluster's discovery API. All of the following work for Pods:
@@ -158,7 +192,7 @@ Custom resources work the same way once installed:
 example.com/v1/Widget
 ```
 
-## API reference
+## [0x04] API reference
 
 ### Read paths
 
@@ -203,7 +237,7 @@ K8s::helper_path()    → $abs_path
 K8s::ensure_built()   → $abs_path
 ```
 
-## Helper protocol
+## [0x05] Helper protocol
 
 ```sh
 stryke-k8s-helper get pods --namespace=default
@@ -224,7 +258,7 @@ Output:
 * `logs` (buffered) → raw text
 * errors → stderr + non-zero exit
 
-## Tests
+## [0x06] Tests
 
 ```sh
 cargo test                                   # compiles, no live cluster
@@ -244,7 +278,7 @@ docker run --rm --name k3s -p 6443:6443 \
     server --disable=traefik --tls-san=127.0.0.1
 ```
 
-## Dev workflow
+## [0x07] Dev workflow
 
 ```sh
 make             # release build
@@ -254,7 +288,7 @@ make install
 make clean
 ```
 
-## Layout
+## [0x08] Layout
 
 ```
 stryke-k8s/
@@ -278,7 +312,7 @@ stryke-k8s/
     release.yml                    # cross-compile + GH release on tag push
 ```
 
-## Roadmap
+## [0x09] Roadmap
 
 | v1 (this release) | v2+ |
 |---|---|
@@ -289,6 +323,6 @@ stryke-k8s/
 | Watch via kube `watcher` | Informer-style cache with resync |
 | kubeconfig + in-cluster SA | OIDC / EKS-token / GKE-gcloud exec plugins parity |
 
-## License
+## [0xFF] License
 
 MIT.
