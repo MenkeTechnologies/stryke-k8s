@@ -1366,6 +1366,46 @@ mod tests {
         let g = extract_gvk(&doc).unwrap();
         assert_eq!(g.kind, "Lease");
     }
+
+    #[test]
+    fn expand_shortname_cj_cronjobs() {
+        assert_eq!(expand_shortname("cj"), Some("cronjobs"));
+    }
+
+    #[test]
+    fn expand_shortname_netpol() {
+        assert_eq!(expand_shortname("netpol"), Some("networkpolicies"));
+    }
+
+    #[test]
+    fn expand_shortname_sc_storageclass() {
+        assert_eq!(expand_shortname("sc"), Some("storageclasses"));
+    }
+
+    #[test]
+    fn read_doc_yaml_list_root() {
+        let v = read_doc(Some("- a\n- b\n")).unwrap();
+        assert!(v.is_array());
+    }
+
+    #[test]
+    fn extract_gvk_batch_cronjob() {
+        let doc = json!({"apiVersion":"batch/v1","kind":"CronJob"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.group, "batch");
+    }
+
+    #[test]
+    fn emit_ndjson_object_line() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!({"k": 1})).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "{\"k\":1}\n");
+    }
+
+    #[test]
+    fn expand_shortname_ep_endpoints() {
+        assert_eq!(expand_shortname("ep"), Some("endpoints"));
+    }
 }
 
 /* ------------------------------------------------------------------------- */
