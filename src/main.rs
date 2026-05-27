@@ -1067,6 +1067,257 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s.lines().count(), 3);
     }
+
+    #[test]
+    fn expand_shortname_ingress_and_endpoints() {
+        assert_eq!(expand_shortname("ing"), Some("ingresses"));
+        assert_eq!(expand_shortname("ep"), Some("endpoints"));
+    }
+
+    #[test]
+    fn expand_shortname_hpa_and_cronjob() {
+        assert_eq!(expand_shortname("hpa"), Some("horizontalpodautoscalers"));
+        assert_eq!(expand_shortname("cj"), Some("cronjobs"));
+    }
+
+    #[test]
+    fn matches_on_api_version_group_form() {
+        let r = ar("apps", "v1", "Deployment", "deployments");
+        assert!(matches(&r, "deployments"));
+        assert!(matches(&r, "deployment"));
+    }
+
+    #[test]
+    fn matches_rejects_wrong_kind() {
+        let r = ar("batch", "v1", "Job", "jobs");
+        assert!(!matches(&r, "cronjob"));
+    }
+
+    #[test]
+    fn extract_gvk_beta_api_version() {
+        let doc = json!({"apiVersion":"batch/v1beta1","kind":"CronJob"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.group, "batch");
+        assert_eq!(g.version, "v1beta1");
+        assert_eq!(g.kind, "CronJob");
+    }
+
+    #[test]
+    fn read_doc_yaml_list_still_parses() {
+        let yaml = "- item: 1\n";
+        let v = read_doc(Some(yaml)).unwrap();
+        assert!(v.is_array());
+    }
+
+    #[test]
+    fn extract_gvk_empty_kind_string_accepted() {
+        // Present but empty — not treated as missing; pins liberal behavior.
+        let doc = json!({"apiVersion":"v1","kind":""});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.kind, "");
+    }
+
+    #[test]
+    fn expand_shortname_netpol_and_sc() {
+        assert_eq!(expand_shortname("netpol"), Some("networkpolicies"));
+        assert_eq!(expand_shortname("sc"), Some("storageclasses"));
+    }
+
+    #[test]
+    fn expand_shortname_limits_and_quota() {
+        assert_eq!(expand_shortname("limits"), Some("limitranges"));
+        assert_eq!(expand_shortname("quota"), Some("resourcequotas"));
+    }
+
+    #[test]
+    fn matches_singular_alias_adds_s_to_kind() {
+        let r = ar("", "v1", "Pod", "pods");
+        assert!(matches(&r, "pods"));
+        assert!(matches(&r, "pod"));
+    }
+
+    #[test]
+    fn matches_kind_case_insensitive() {
+        let r = ar("", "v1", "ConfigMap", "configmaps");
+        assert!(matches(&r, "configmap"));
+    }
+
+    #[test]
+    fn extract_gvk_core_group_empty() {
+        let doc = json!({"apiVersion":"v1","kind":"Service"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.group, "");
+        assert_eq!(g.version, "v1");
+        assert_eq!(g.kind, "Service");
+    }
+
+    #[test]
+    fn read_doc_json_array_root() {
+        let v = read_doc(Some("[{\"a\":1}]")).unwrap();
+        assert!(v.is_array());
+    }
+
+    #[test]
+    fn matches_rejects_plural_with_extra_suffix() {
+        let r = ar("", "v1", "Pod", "pods");
+        assert!(!matches(&r, "podss"));
+    }
+
+    #[test]
+    fn expand_shortname_pdb() {
+        assert_eq!(expand_shortname("pdb"), Some("poddisruptionbudgets"));
+    }
+
+    #[test]
+    fn expand_shortname_ev_and_cs() {
+        assert_eq!(expand_shortname("ev"), Some("events"));
+        assert_eq!(expand_shortname("cs"), Some("componentstatuses"));
+    }
+
+    #[test]
+    fn expand_shortname_pc_priorityclass() {
+        assert_eq!(expand_shortname("pc"), Some("priorityclasses"));
+    }
+
+    #[test]
+    fn matches_on_plural_exact() {
+        let r = ar("apps", "v1", "Deployment", "deployments");
+        assert!(matches(&r, "deployments"));
+    }
+
+    #[test]
+    fn extract_gvk_apiextensions_group() {
+        let doc = json!({"apiVersion":"apiextensions.k8s.io/v1","kind":"CustomResourceDefinition"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.group, "apiextensions.k8s.io");
+        assert_eq!(g.kind, "CustomResourceDefinition");
+    }
+
+    #[test]
+    fn read_doc_yaml_mapping() {
+        let yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n";
+        let v = read_doc(Some(yaml)).unwrap();
+        assert_eq!(v["kind"], json!("ConfigMap"));
+        assert_eq!(v["metadata"]["name"], json!("cfg"));
+    }
+
+    #[test]
+    fn matches_kind_exact_case_folded() {
+        let r = ar("", "v1", "ServiceAccount", "serviceaccounts");
+        assert!(matches(&r, "serviceaccount"));
+    }
+
+    #[test]
+    fn extract_gvk_unversioned_string_becomes_core_group() {
+        // kube GroupVersion treats a lone segment as core API version (no group).
+        let doc = json!({"apiVersion":"not-valid","kind":"Pod"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.group, "");
+        assert_eq!(g.version, "not-valid");
+        assert_eq!(g.kind, "Pod");
+    }
+
+    #[test]
+    fn extract_gvk_networking_group() {
+        let doc = json!({"apiVersion":"networking.k8s.io/v1","kind":"Ingress"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.group, "networking.k8s.io");
+        assert_eq!(g.kind, "Ingress");
+    }
+
+    #[test]
+    fn read_doc_json_null_literal() {
+        let v = read_doc(Some("null")).unwrap();
+        assert!(v.is_null());
+    }
+
+    #[test]
+    fn matches_job_plural_and_singular() {
+        let r = ar("batch", "v1", "Job", "jobs");
+        assert!(matches(&r, "jobs"));
+        assert!(matches(&r, "job"));
+    }
+
+    #[test]
+    fn extract_gvk_kind_missing_errors() {
+        let doc = json!({"apiVersion":"v1"});
+        assert!(extract_gvk(&doc).is_err());
+    }
+
+    #[test]
+    fn matches_rejects_empty_selector() {
+        let r = ar("", "v1", "Pod", "pods");
+        assert!(!matches(&r, ""));
+    }
+
+    #[test]
+    fn extract_gvk_alpha_version_segment() {
+        let doc = json!({"apiVersion":"certificates.k8s.io/v1alpha1","kind":"CertificateSigningRequest"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.version, "v1alpha1");
+    }
+
+    #[test]
+    fn emit_ndjson_preserves_unicode_key() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!({"名前": "値"})).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("名前") || s.contains("\\u"));
+    }
+
+    #[test]
+    fn expand_shortname_pv_only() {
+        assert_eq!(expand_shortname("pv"), Some("persistentvolumes"));
+    }
+
+    #[test]
+    fn expand_shortname_sa_serviceaccount() {
+        assert_eq!(expand_shortname("sa"), Some("serviceaccounts"));
+    }
+
+    #[test]
+    fn expand_shortname_crd() {
+        assert_eq!(expand_shortname("crd"), Some("customresourcedefinitions"));
+    }
+
+    #[test]
+    fn matches_statefulset_plural() {
+        let r = ar("apps", "v1", "StatefulSet", "statefulsets");
+        assert!(matches(&r, "statefulset"));
+    }
+
+    #[test]
+    fn extract_gvk_storage_group() {
+        let doc = json!({"apiVersion":"storage.k8s.io/v1","kind":"StorageClass"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.group, "storage.k8s.io");
+        assert_eq!(g.kind, "StorageClass");
+    }
+
+    #[test]
+    fn read_doc_json_number_root() {
+        let v = read_doc(Some("42")).unwrap();
+        assert_eq!(v, json!(42));
+    }
+
+    #[test]
+    fn matches_cronjob_kind_alias() {
+        let r = ar("batch", "v1", "CronJob", "cronjobs");
+        assert!(matches(&r, "cronjob"));
+    }
+
+    #[test]
+    fn emit_ndjson_scalar_string() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!("line")).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "\"line\"\n");
+    }
+
+    #[test]
+    fn extract_gvk_kind_non_string_errors() {
+        let doc = json!({"apiVersion":"v1","kind":123});
+        assert!(extract_gvk(&doc).is_err());
+    }
 }
 
 /* ------------------------------------------------------------------------- */
