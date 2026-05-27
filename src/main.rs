@@ -882,6 +882,193 @@ async fn cmd_namespaces(client: &Client) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ─── expand_shortname ────────────────────────────────────────────
+
+    #[test]
+    fn expand_shortname_common_kubectl_aliases() {
+        assert_eq!(expand_shortname("po"), Some("pods"));
+        assert_eq!(expand_shortname("svc"), Some("services"));
+        assert_eq!(expand_shortname("deploy"), Some("deployments"));
+        assert_eq!(expand_shortname("rs"), Some("replicasets"));
+        assert_eq!(expand_shortname("ds"), Some("daemonsets"));
+        assert_eq!(expand_shortname("sts"), Some("statefulsets"));
+        assert_eq!(expand_shortname("cm"), Some("configmaps"));
+        assert_eq!(expand_shortname("ns"), Some("namespaces"));
+        assert_eq!(expand_shortname("no"), Some("nodes"));
+        assert_eq!(expand_shortname("pvc"), Some("persistentvolumeclaims"));
+        assert_eq!(expand_shortname("pv"), Some("persistentvolumes"));
+        assert_eq!(expand_shortname("sa"), Some("serviceaccounts"));
+        assert_eq!(expand_shortname("crd"), Some("customresourcedefinitions"));
+        assert_eq!(expand_shortname("cj"), Some("cronjobs"));
+    }
+
+    #[test]
+    fn expand_shortname_unknown_returns_none() {
+        assert_eq!(expand_shortname("pods"), None); // already canonical
+        assert_eq!(expand_shortname("Pod"), None);  // case-sensitive
+        assert_eq!(expand_shortname(""), None);
+        assert_eq!(expand_shortname("xyz"), None);
+    }
+
+    #[test]
+    fn expand_shortname_case_sensitive() {
+        // kubectl shortnames are lowercase-only; mixed case must not match.
+        assert_eq!(expand_shortname("PO"), None);
+        assert_eq!(expand_shortname("Po"), None);
+        assert_eq!(expand_shortname("PVC"), None);
+    }
+
+    // ─── matches ─────────────────────────────────────────────────────
+
+    fn ar(group: &str, version: &str, kind: &str, plural: &str) -> ApiResource {
+        ApiResource {
+            group: group.into(),
+            version: version.into(),
+            api_version: if group.is_empty() {
+                version.into()
+            } else {
+                format!("{group}/{version}")
+            },
+            kind: kind.into(),
+            plural: plural.into(),
+        }
+    }
+
+    #[test]
+    fn matches_on_kind_lowercase() {
+        let r = ar("", "v1", "Pod", "pods");
+        assert!(matches(&r, "pod"));
+    }
+
+    #[test]
+    fn matches_on_plural() {
+        let r = ar("", "v1", "Pod", "pods");
+        assert!(matches(&r, "pods"));
+    }
+
+    #[test]
+    fn matches_kind_plus_s_singular_alias() {
+        // The fallback rule: if user asks for "configmaps" and the kind is
+        // "ConfigMap" but plural is unknown, we still match. Pin the rule.
+        let r = ar("", "v1", "Service", "services");
+        // services is plural; "service" matches via kind-lowercase rule.
+        assert!(matches(&r, "service"));
+    }
+
+    #[test]
+    fn matches_rejects_unrelated_string() {
+        let r = ar("", "v1", "Pod", "pods");
+        assert!(!matches(&r, "podx"));
+        assert!(!matches(&r, ""));
+        assert!(!matches(&r, "node"));
+    }
+
+    // ─── read_doc (explicit-string branch — stdin branch skipped) ────
+
+    #[test]
+    fn read_doc_json_object() {
+        let v = read_doc(Some(r#"{"apiVersion":"v1","kind":"Pod"}"#)).unwrap();
+        assert_eq!(v["apiVersion"], json!("v1"));
+        assert_eq!(v["kind"], json!("Pod"));
+    }
+
+    #[test]
+    fn read_doc_json_array() {
+        let v = read_doc(Some("[1,2,3]")).unwrap();
+        assert!(v.is_array());
+        assert_eq!(v.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn read_doc_yaml_when_not_starting_with_brace_or_bracket() {
+        let yaml = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: foo\n";
+        let v = read_doc(Some(yaml)).unwrap();
+        assert_eq!(v["apiVersion"], json!("v1"));
+        assert_eq!(v["kind"], json!("Pod"));
+        assert_eq!(v["metadata"]["name"], json!("foo"));
+    }
+
+    #[test]
+    fn read_doc_json_with_leading_whitespace() {
+        // trim_start checks the first non-ws char, so leading newline/spaces
+        // before '{' still routes to the JSON path.
+        let v = read_doc(Some("\n  \n{\"k\":1}")).unwrap();
+        assert_eq!(v["k"], json!(1));
+    }
+
+    #[test]
+    fn read_doc_invalid_input_errors() {
+        let err = read_doc(Some("{not json")).unwrap_err();
+        assert!(format!("{err:#}").to_lowercase().contains("parsing"));
+    }
+
+    // ─── extract_gvk ─────────────────────────────────────────────────
+
+    #[test]
+    fn extract_gvk_core_v1() {
+        let doc = json!({"apiVersion":"v1","kind":"Pod"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.group, "");
+        assert_eq!(g.version, "v1");
+        assert_eq!(g.kind, "Pod");
+    }
+
+    #[test]
+    fn extract_gvk_apps_v1() {
+        let doc = json!({"apiVersion":"apps/v1","kind":"Deployment"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.group, "apps");
+        assert_eq!(g.version, "v1");
+        assert_eq!(g.kind, "Deployment");
+    }
+
+    #[test]
+    fn extract_gvk_missing_apiversion_errors() {
+        let doc = json!({"kind":"Pod"});
+        let err = extract_gvk(&doc).unwrap_err();
+        assert!(format!("{err}").contains("apiVersion"));
+    }
+
+    #[test]
+    fn extract_gvk_missing_kind_errors() {
+        let doc = json!({"apiVersion":"v1"});
+        let err = extract_gvk(&doc).unwrap_err();
+        assert!(format!("{err}").contains("kind"));
+    }
+
+    #[test]
+    fn extract_gvk_apiversion_not_string_errors() {
+        let doc = json!({"apiVersion":123,"kind":"Pod"});
+        let err = extract_gvk(&doc).unwrap_err();
+        // as_str returns None for non-string → same "missing" message.
+        assert!(format!("{err}").contains("apiVersion"));
+    }
+
+    // ─── emit_ndjson ─────────────────────────────────────────────────
+
+    #[test]
+    fn emit_ndjson_appends_newline() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!({"k": 1})).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "{\"k\":1}\n");
+    }
+
+    #[test]
+    fn emit_ndjson_multi_call_line_count() {
+        let mut buf = Vec::new();
+        for i in 0..3 {
+            emit_ndjson(&mut buf, &json!({"i": i})).unwrap();
+        }
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s.lines().count(), 3);
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 /* verbs helper (silence unused-import warning under feature toggles)         */
 /* ------------------------------------------------------------------------- */
