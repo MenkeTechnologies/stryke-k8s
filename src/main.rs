@@ -1318,6 +1318,54 @@ mod tests {
         let doc = json!({"apiVersion":"v1","kind":123});
         assert!(extract_gvk(&doc).is_err());
     }
+
+    #[test]
+    fn expand_shortname_ing_ingress() {
+        assert_eq!(expand_shortname("ing"), Some("ingresses"));
+    }
+
+    #[test]
+    fn expand_shortname_hpa() {
+        assert_eq!(expand_shortname("hpa"), Some("horizontalpodautoscalers"));
+    }
+
+    #[test]
+    fn matches_service_plural() {
+        let r = ar("", "v1", "Service", "services");
+        assert!(matches(&r, "services"));
+    }
+
+    #[test]
+    fn extract_gvk_autoscaling_group() {
+        let doc = json!({"apiVersion":"autoscaling/v2","kind":"HorizontalPodAutoscaler"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.group, "autoscaling");
+    }
+
+    #[test]
+    fn read_doc_json_bool_root() {
+        assert!(read_doc(Some("true")).unwrap().is_boolean());
+    }
+
+    #[test]
+    fn matches_rejects_unrelated_kind() {
+        let r = ar("", "v1", "Pod", "pods");
+        assert!(!matches(&r, "service"));
+    }
+
+    #[test]
+    fn emit_ndjson_number_scalar() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!(99)).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "99\n");
+    }
+
+    #[test]
+    fn extract_gvk_coordination_lease() {
+        let doc = json!({"apiVersion":"coordination.k8s.io/v1","kind":"Lease"});
+        let g = extract_gvk(&doc).unwrap();
+        assert_eq!(g.kind, "Lease");
+    }
 }
 
 /* ------------------------------------------------------------------------- */
