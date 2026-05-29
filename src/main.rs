@@ -1538,4 +1538,94 @@ mod tests {
         assert!(expand_shortname("deployments").is_none());
     }
 
+    // ─── clap parsing — Cli top-level + Cmd routing ─────────────────────
+    // Pin the user-facing CLI contract. k8s API calls bind to these flag
+    // values; drift would silently change which namespace, resource kind,
+    // or field-manager identity is sent on the wire.
+
+    fn parse_cli(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut argv = vec!["stryke-k8s-helper"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    #[test]
+    fn cli_ping_and_version_are_unit_variants() {
+        assert!(matches!(parse_cli(&["ping"]).expect("ping").cmd, Cmd::Ping));
+        assert!(matches!(
+            parse_cli(&["version"]).expect("version").cmd,
+            Cmd::Version
+        ));
+    }
+
+    #[test]
+    fn cli_get_requires_kind_positional() {
+        let err = parse_cli(&["get"]).expect_err("missing kind");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn cli_get_namespace_and_all_namespaces_default_off() {
+        // Pin: bare `get pods` must NOT silently cross namespaces or
+        // pick a default; that decision is the caller's (config / -n).
+        let cli = parse_cli(&["get", "pods"]).expect("parse");
+        match cli.cmd {
+            Cmd::Get {
+                namespace,
+                all_namespaces,
+                ..
+            } => {
+                assert!(namespace.is_none());
+                assert!(!all_namespaces);
+            }
+            _ => panic!("expected Get"),
+        }
+    }
+
+    #[test]
+    fn cli_apply_field_manager_default_is_stryke_k8s() {
+        // Pin the SSA identity — must match the apply tracker name
+        // upstream consumers (controllers, audit logs) bind against.
+        let cli = parse_cli(&["apply"]).expect("parse");
+        match cli.cmd {
+            Cmd::Apply {
+                field_manager,
+                force,
+                ..
+            } => {
+                assert_eq!(field_manager, "stryke-k8s");
+                assert!(!force, "--force opt-in (no silent SSA conflict overrides)");
+            }
+            _ => panic!("expected Apply"),
+        }
+    }
+
+    #[test]
+    fn cli_exec_cmd_required_with_one_or_more_args() {
+        // `cmd` is `num_args = 1.., required = true` — pin that
+        // `exec pod-x` alone errors but `exec pod-x --cmd sh` works.
+        let err = parse_cli(&["exec", "pod-x"]).expect_err("missing --cmd");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        // Multi-arg `--cmd` collects until the next flag boundary; pass a
+        // simple sequence with no hyphen-prefixed tokens so the parser
+        // takes all of them as positional values.
+        let cli = parse_cli(&["exec", "pod-x", "--cmd", "ls", "/etc"]).expect("parse");
+        match cli.cmd {
+            Cmd::Exec { cmd, .. } => {
+                assert_eq!(cmd, vec!["ls", "/etc"]);
+            }
+            _ => panic!("expected Exec"),
+        }
+    }
+
+    #[test]
+    fn cli_scale_replicas_required_and_typed_i32() {
+        let err = parse_cli(&["scale", "deploy", "myapp"]).expect_err("missing --replicas");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let cli = parse_cli(&["scale", "deploy", "myapp", "--replicas", "5"]).expect("parse");
+        match cli.cmd {
+            Cmd::Scale { replicas, .. } => assert_eq!(replicas, 5),
+            _ => panic!("expected Scale"),
+        }
+    }
 }
