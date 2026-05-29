@@ -125,7 +125,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: stryke-k8s-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/stryke-k8s-helper
