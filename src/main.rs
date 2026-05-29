@@ -1482,4 +1482,60 @@ mod tests {
     fn expand_shortname_ep_endpoints() {
         assert_eq!(expand_shortname("ep"), Some("endpoints"));
     }
+
+    // ─── expand_shortname full-table sanity ──────────────────────────
+    //
+    // The shortname table mirrors kubectl's canonical alias list — a
+    // missing entry silently breaks scripts that pipe `kubectl get cj`
+    // through this binary. Pin the whole 25-entry table at once so any
+    // accidental deletion fails loudly.
+
+    #[test]
+    fn expand_shortname_all_25_kubectl_aliases_round_trip() {
+        let expected: &[(&str, &str)] = &[
+            ("po", "pods"),
+            ("svc", "services"),
+            ("deploy", "deployments"),
+            ("rs", "replicasets"),
+            ("ds", "daemonsets"),
+            ("sts", "statefulsets"),
+            ("cm", "configmaps"),
+            ("ns", "namespaces"),
+            ("no", "nodes"),
+            ("ing", "ingresses"),
+            ("ep", "endpoints"),
+            ("ev", "events"),
+            ("pv", "persistentvolumes"),
+            ("pvc", "persistentvolumeclaims"),
+            ("sa", "serviceaccounts"),
+            ("pdb", "poddisruptionbudgets"),
+            ("hpa", "horizontalpodautoscalers"),
+            ("crd", "customresourcedefinitions"),
+            ("cs", "componentstatuses"),
+            ("limits", "limitranges"),
+            ("quota", "resourcequotas"),
+            ("netpol", "networkpolicies"),
+            ("pc", "priorityclasses"),
+            ("sc", "storageclasses"),
+            ("cj", "cronjobs"),
+        ];
+        for (short, long) in expected {
+            assert_eq!(
+                expand_shortname(short),
+                Some(*long),
+                "shortname `{short}` should expand to `{long}`"
+            );
+        }
+    }
+
+    #[test]
+    fn expand_shortname_full_names_pass_through_as_none() {
+        // The function only expands aliases — passing the canonical
+        // long form must return None so the caller falls through to
+        // the unmodified `&lower`.
+        assert!(expand_shortname("pods").is_none());
+        assert!(expand_shortname("services").is_none());
+        assert!(expand_shortname("deployments").is_none());
+    }
+
 }
