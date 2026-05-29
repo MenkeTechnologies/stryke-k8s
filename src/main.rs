@@ -1628,4 +1628,180 @@ mod tests {
             _ => panic!("expected Scale"),
         }
     }
+
+    // ─── clap parsing — additional Cmd surfaces + Conn flatten (round 2) ──
+    // Previous round pinned ping/version/get/apply/exec/scale. These pin:
+    // (a) Conn flatten (--context/--kubeconfig/--default-namespace) all
+    // default None and accept env-var fallback names; (b) GetOne/Delete
+    // two-positional contracts; (c) Logs --follow/--previous default off
+    // (no implicit log tailing or previous-container reads); (d) Watch
+    // kind required; (e) unit-variant Namespaces/ApiResources/Contexts
+    // routing; (f) Scale replicas accepts 0 (legitimate zero-pod scale).
+
+    #[test]
+    fn cli_conn_flags_default_none_and_thread_through() {
+        // Pin: bare `ping` leaves all Conn fields None. Drift to populated
+        // defaults would silently scope every command to one context.
+        let cli = parse_cli(&["ping"]).expect("parse");
+        assert!(cli.conn.context.is_none());
+        assert!(cli.conn.default_namespace.is_none());
+        assert!(cli.conn.kubeconfig.is_none());
+
+        let cli = parse_cli(&[
+            "--context",
+            "prod",
+            "--default-namespace",
+            "team-a",
+            "--kubeconfig",
+            "/tmp/kc",
+            "ping",
+        ])
+        .expect("parse");
+        assert_eq!(cli.conn.context.as_deref(), Some("prod"));
+        assert_eq!(cli.conn.default_namespace.as_deref(), Some("team-a"));
+        assert_eq!(cli.conn.kubeconfig.as_deref(), Some("/tmp/kc"));
+    }
+
+    #[test]
+    fn cli_getone_and_delete_require_kind_and_name() {
+        // Both subcommands take two positionals — clap rejects with only
+        // one. Drift to one-positional would silently route as "operate
+        // on every <kind>".
+        use clap::error::ErrorKind::MissingRequiredArgument;
+        assert_eq!(
+            parse_cli(&["get-one"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_cli(&["get-one", "pod"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        let cli = parse_cli(&["get-one", "pod", "myapp-abc"]).expect("parse");
+        match cli.cmd {
+            Cmd::GetOne { kind, name, .. } => {
+                assert_eq!(kind, "pod");
+                assert_eq!(name, "myapp-abc");
+            }
+            _ => panic!("expected GetOne"),
+        }
+
+        assert_eq!(
+            parse_cli(&["delete"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_cli(&["delete", "pod"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        let cli = parse_cli(&["delete", "pod", "myapp-abc"]).expect("parse");
+        match cli.cmd {
+            Cmd::Delete {
+                kind,
+                name,
+                force,
+                grace_period,
+                ..
+            } => {
+                assert_eq!(kind, "pod");
+                assert_eq!(name, "myapp-abc");
+                assert!(!force);
+                assert!(grace_period.is_none());
+            }
+            _ => panic!("expected Delete"),
+        }
+    }
+
+    #[test]
+    fn cli_logs_follow_and_previous_default_off_with_required_pod() {
+        // Pin: `logs <pod>` with no flags is a one-shot read, not a tail,
+        // and not a --previous-container read. Drift here would silently
+        // block the helper indefinitely or return logs from a dead container.
+        use clap::error::ErrorKind::MissingRequiredArgument;
+        assert_eq!(
+            parse_cli(&["logs"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+
+        let cli = parse_cli(&["logs", "mypod"]).expect("parse");
+        match cli.cmd {
+            Cmd::Logs {
+                pod,
+                follow,
+                previous,
+                timestamps,
+                ..
+            } => {
+                assert_eq!(pod, "mypod");
+                assert!(!follow);
+                assert!(!previous);
+                assert!(!timestamps);
+            }
+            _ => panic!("expected Logs"),
+        }
+    }
+
+    #[test]
+    fn cli_watch_requires_kind_and_optional_selectors_thread_through() {
+        // Pin: watch requires kind; label_selector/field_selector both
+        // default None and thread through when supplied (binding to the
+        // watch API params is downstream of clap, not tested here).
+        use clap::error::ErrorKind::MissingRequiredArgument;
+        assert_eq!(
+            parse_cli(&["watch"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+
+        let cli = parse_cli(&[
+            "watch",
+            "pods",
+            "--label-selector",
+            "app=web",
+            "--field-selector",
+            "status.phase=Running",
+        ])
+        .expect("parse");
+        match cli.cmd {
+            Cmd::Watch {
+                kind,
+                label_selector,
+                field_selector,
+                namespace,
+            } => {
+                assert_eq!(kind, "pods");
+                assert_eq!(label_selector.as_deref(), Some("app=web"));
+                assert_eq!(field_selector.as_deref(), Some("status.phase=Running"));
+                assert!(namespace.is_none());
+            }
+            _ => panic!("expected Watch"),
+        }
+    }
+
+    #[test]
+    fn cli_namespaces_api_resources_and_contexts_unit_variants_with_zero_replicas_scale() {
+        // Pin: 5 unit-variant subcommands route correctly. Also pin scale
+        // --replicas accepts 0 — i.e. a valid zero-pod scale-down (no
+        // implicit u32-unsigned-rejection or minimum-1 clamp).
+        assert!(matches!(
+            parse_cli(&["namespaces"]).unwrap().cmd,
+            Cmd::Namespaces
+        ));
+        assert!(matches!(
+            parse_cli(&["api-resources"]).unwrap().cmd,
+            Cmd::ApiResources
+        ));
+        assert!(matches!(
+            parse_cli(&["contexts"]).unwrap().cmd,
+            Cmd::Contexts
+        ));
+        assert!(matches!(
+            parse_cli(&["current-context"]).unwrap().cmd,
+            Cmd::CurrentContext
+        ));
+
+        let cli = parse_cli(&["scale", "deploy", "myapp", "--replicas", "0"]).expect("parse");
+        match cli.cmd {
+            Cmd::Scale { replicas, .. } => assert_eq!(replicas, 0),
+            _ => panic!("expected Scale"),
+        }
+    }
 }
