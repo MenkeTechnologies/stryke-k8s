@@ -13,8 +13,8 @@ use clap::{Args, Parser, Subcommand};
 use futures_util::{AsyncBufReadExt, StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{
-    Api, AttachParams, DeleteParams, DynamicObject, GroupVersionKind, ListParams, LogParams,
-    Patch, PatchParams, PostParams, ResourceExt,
+    Api, AttachParams, DeleteParams, DynamicObject, GroupVersionKind, ListParams, LogParams, Patch,
+    PatchParams, PostParams, ResourceExt,
 };
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::core::{ApiResource, GroupVersion};
@@ -214,7 +214,11 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Cmd::GetOne { kind, name, namespace } => {
+        Cmd::GetOne {
+            kind,
+            name,
+            namespace,
+        } => {
             cmd_get_one(
                 &client,
                 &kind,
@@ -223,7 +227,12 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Cmd::Apply { doc, field_manager, force, namespace } => {
+        Cmd::Apply {
+            doc,
+            field_manager,
+            force,
+            namespace,
+        } => {
             cmd_apply(
                 &client,
                 doc.as_deref(),
@@ -234,13 +243,28 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Cmd::Create { doc, namespace } => {
-            cmd_create(&client, doc.as_deref(), namespace.as_deref().unwrap_or(&default_ns)).await
+            cmd_create(
+                &client,
+                doc.as_deref(),
+                namespace.as_deref().unwrap_or(&default_ns),
+            )
+            .await
         }
         Cmd::Replace { doc, namespace } => {
-            cmd_replace(&client, doc.as_deref(), namespace.as_deref().unwrap_or(&default_ns))
-                .await
+            cmd_replace(
+                &client,
+                doc.as_deref(),
+                namespace.as_deref().unwrap_or(&default_ns),
+            )
+            .await
         }
-        Cmd::Delete { kind, name, namespace, grace_period, force } => {
+        Cmd::Delete {
+            kind,
+            name,
+            namespace,
+            grace_period,
+            force,
+        } => {
             cmd_delete(
                 &client,
                 &kind,
@@ -274,7 +298,12 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Cmd::Scale { kind, name, replicas, namespace } => {
+        Cmd::Scale {
+            kind,
+            name,
+            replicas,
+            namespace,
+        } => {
             cmd_scale(
                 &client,
                 &kind,
@@ -284,7 +313,12 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Cmd::Watch { kind, namespace, label_selector, field_selector } => {
+        Cmd::Watch {
+            kind,
+            namespace,
+            label_selector,
+            field_selector,
+        } => {
             cmd_watch(
                 &client,
                 &kind,
@@ -294,7 +328,12 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Cmd::Exec { pod, namespace, container, cmd } => {
+        Cmd::Exec {
+            pod,
+            namespace,
+            container,
+            cmd,
+        } => {
             cmd_exec(
                 &client,
                 &pod,
@@ -323,8 +362,8 @@ async fn make_client(c: &Conn) -> Result<Client> {
         user: None,
     };
     let cfg = if let Some(path) = &c.kubeconfig {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading kubeconfig {path}"))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading kubeconfig {path}"))?;
         let kc: Kubeconfig = serde_yaml::from_str(&raw).context("parsing kubeconfig")?;
         Config::from_custom_kubeconfig(kc, &opts)
             .await
@@ -379,32 +418,32 @@ async fn resolve_kind(client: &Client, raw: &str) -> Result<(ApiResource, Scope)
 /// Standard kubectl short names → canonical plural form.
 fn expand_shortname(s: &str) -> Option<&'static str> {
     match s {
-        "po"      => Some("pods"),
-        "svc"     => Some("services"),
-        "deploy"  => Some("deployments"),
-        "rs"      => Some("replicasets"),
-        "ds"      => Some("daemonsets"),
-        "sts"     => Some("statefulsets"),
-        "cm"      => Some("configmaps"),
-        "ns"      => Some("namespaces"),
-        "no"      => Some("nodes"),
-        "ing"     => Some("ingresses"),
-        "ep"      => Some("endpoints"),
-        "ev"      => Some("events"),
-        "pv"      => Some("persistentvolumes"),
-        "pvc"     => Some("persistentvolumeclaims"),
-        "sa"      => Some("serviceaccounts"),
-        "pdb"     => Some("poddisruptionbudgets"),
-        "hpa"     => Some("horizontalpodautoscalers"),
-        "crd"     => Some("customresourcedefinitions"),
-        "cs"      => Some("componentstatuses"),
-        "limits"  => Some("limitranges"),
-        "quota"   => Some("resourcequotas"),
-        "netpol"  => Some("networkpolicies"),
-        "pc"      => Some("priorityclasses"),
-        "sc"      => Some("storageclasses"),
-        "cj"      => Some("cronjobs"),
-        _         => None,
+        "po" => Some("pods"),
+        "svc" => Some("services"),
+        "deploy" => Some("deployments"),
+        "rs" => Some("replicasets"),
+        "ds" => Some("daemonsets"),
+        "sts" => Some("statefulsets"),
+        "cm" => Some("configmaps"),
+        "ns" => Some("namespaces"),
+        "no" => Some("nodes"),
+        "ing" => Some("ingresses"),
+        "ep" => Some("endpoints"),
+        "ev" => Some("events"),
+        "pv" => Some("persistentvolumes"),
+        "pvc" => Some("persistentvolumeclaims"),
+        "sa" => Some("serviceaccounts"),
+        "pdb" => Some("poddisruptionbudgets"),
+        "hpa" => Some("horizontalpodautoscalers"),
+        "crd" => Some("customresourcedefinitions"),
+        "cs" => Some("componentstatuses"),
+        "limits" => Some("limitranges"),
+        "quota" => Some("resourcequotas"),
+        "netpol" => Some("networkpolicies"),
+        "pc" => Some("priorityclasses"),
+        "sc" => Some("storageclasses"),
+        "cj" => Some("cronjobs"),
+        _ => None,
     }
 }
 
@@ -426,7 +465,13 @@ fn matches(ar: &ApiResource, lower: &str) -> bool {
 /* helpers                                                                   */
 /* ------------------------------------------------------------------------- */
 
-fn api(client: &Client, ar: &ApiResource, scope: &Scope, ns: &str, all_ns: bool) -> Api<DynamicObject> {
+fn api(
+    client: &Client,
+    ar: &ApiResource,
+    scope: &Scope,
+    ns: &str,
+    all_ns: bool,
+) -> Api<DynamicObject> {
     match scope {
         Scope::Cluster => Api::all_with(client.clone(), ar),
         Scope::Namespaced => {
@@ -522,12 +567,7 @@ async fn cmd_get(
     Ok(())
 }
 
-async fn cmd_get_one(
-    client: &Client,
-    kind: &str,
-    name: &str,
-    namespace: &str,
-) -> Result<()> {
+async fn cmd_get_one(client: &Client, kind: &str, name: &str, namespace: &str) -> Result<()> {
     let (ar, scope) = resolve_kind(client, kind).await?;
     let api = api(client, &ar, &scope, namespace, false);
     match api.get_opt(name).await.context("get")? {
@@ -546,9 +586,13 @@ async fn cmd_apply(
     let body = read_doc(doc)?;
     let gvk = extract_gvk(&body)?;
     let discovery = Discovery::new(client.clone()).run().await?;
-    let (ar, caps) = discovery
-        .resolve_gvk(&gvk)
-        .ok_or_else(|| anyhow!("apiVersion/kind `{}/{}` not found in cluster", gvk.api_version(), gvk.kind))?;
+    let (ar, caps) = discovery.resolve_gvk(&gvk).ok_or_else(|| {
+        anyhow!(
+            "apiVersion/kind `{}/{}` not found in cluster",
+            gvk.api_version(),
+            gvk.kind
+        )
+    })?;
     let name = body
         .get("metadata")
         .and_then(|m| m.get("name"))
@@ -567,7 +611,10 @@ async fn cmd_apply(
         pp = pp.force();
     }
     let patch: DynamicObject = serde_json::from_value(body).context("doc → DynamicObject")?;
-    let res = api.patch(&name, &pp, &Patch::Apply(&patch)).await.context("apply")?;
+    let res = api
+        .patch(&name, &pp, &Patch::Apply(&patch))
+        .await
+        .context("apply")?;
     emit_json(&res)
 }
 
@@ -586,7 +633,10 @@ async fn cmd_create(client: &Client, doc: Option<&str>, default_ns: &str) -> Res
         .to_string();
     let api = api(client, &ar, &caps.scope, &ns, false);
     let obj: DynamicObject = serde_json::from_value(body).context("doc → DynamicObject")?;
-    let res = api.create(&PostParams::default(), &obj).await.context("create")?;
+    let res = api
+        .create(&PostParams::default(), &obj)
+        .await
+        .context("create")?;
     emit_json(&res)
 }
 
@@ -611,7 +661,10 @@ async fn cmd_replace(client: &Client, doc: Option<&str>, default_ns: &str) -> Re
         .to_string();
     let api = api(client, &ar, &caps.scope, &ns, false);
     let obj: DynamicObject = serde_json::from_value(body).context("doc → DynamicObject")?;
-    let res = api.replace(&name, &PostParams::default(), &obj).await.context("replace")?;
+    let res = api
+        .replace(&name, &PostParams::default(), &obj)
+        .await
+        .context("replace")?;
     emit_json(&res)
 }
 
@@ -669,7 +722,11 @@ async fn cmd_logs(
     let mut out = BufWriter::new(stdout.lock());
 
     if follow {
-        let mut stream = pods.log_stream(pod, &lp).await.context("log_stream")?.lines();
+        let mut stream = pods
+            .log_stream(pod, &lp)
+            .await
+            .context("log_stream")?
+            .lines();
         while let Some(line) = stream.try_next().await.context("log line")? {
             emit_ndjson(&mut out, &json!({ "line": line }))?;
             out.flush().ok();
@@ -792,7 +849,10 @@ async fn cmd_exec(
 }
 
 async fn cmd_version(client: &Client) -> Result<()> {
-    let v = client.apiserver_version().await.context("apiserver_version")?;
+    let v = client
+        .apiserver_version()
+        .await
+        .context("apiserver_version")?;
     emit_json(&v)
 }
 
@@ -828,8 +888,8 @@ async fn cmd_current_context(c: &Conn) -> Result<()> {
 
 fn load_kubeconfig(c: &Conn) -> Result<Kubeconfig> {
     if let Some(path) = &c.kubeconfig {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading kubeconfig {path}"))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading kubeconfig {path}"))?;
         return serde_yaml::from_str(&raw).context("parsing kubeconfig");
     }
     Kubeconfig::read().context("reading kubeconfig from default search path")
@@ -882,6 +942,21 @@ async fn cmd_namespaces(client: &Client) -> Result<()> {
     Ok(())
 }
 
+/* ------------------------------------------------------------------------- */
+/* verbs helper (silence unused-import warning under feature toggles)         */
+/* ------------------------------------------------------------------------- */
+#[allow(dead_code)]
+fn _verbs_marker() -> &'static [&'static str] {
+    &[
+        verbs::LIST,
+        verbs::GET,
+        verbs::CREATE,
+        verbs::DELETE,
+        verbs::PATCH,
+        verbs::WATCH,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,7 +985,7 @@ mod tests {
     #[test]
     fn expand_shortname_unknown_returns_none() {
         assert_eq!(expand_shortname("pods"), None); // already canonical
-        assert_eq!(expand_shortname("Pod"), None);  // case-sensitive
+        assert_eq!(expand_shortname("Pod"), None); // case-sensitive
         assert_eq!(expand_shortname(""), None);
         assert_eq!(expand_shortname("xyz"), None);
     }
@@ -1252,7 +1327,8 @@ mod tests {
 
     #[test]
     fn extract_gvk_alpha_version_segment() {
-        let doc = json!({"apiVersion":"certificates.k8s.io/v1alpha1","kind":"CertificateSigningRequest"});
+        let doc =
+            json!({"apiVersion":"certificates.k8s.io/v1alpha1","kind":"CertificateSigningRequest"});
         let g = extract_gvk(&doc).unwrap();
         assert_eq!(g.version, "v1alpha1");
     }
@@ -1406,19 +1482,4 @@ mod tests {
     fn expand_shortname_ep_endpoints() {
         assert_eq!(expand_shortname("ep"), Some("endpoints"));
     }
-}
-
-/* ------------------------------------------------------------------------- */
-/* verbs helper (silence unused-import warning under feature toggles)         */
-/* ------------------------------------------------------------------------- */
-#[allow(dead_code)]
-fn _verbs_marker() -> &'static [&'static str] {
-    &[
-        verbs::LIST,
-        verbs::GET,
-        verbs::CREATE,
-        verbs::DELETE,
-        verbs::PATCH,
-        verbs::WATCH,
-    ]
 }

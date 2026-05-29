@@ -1,6 +1,6 @@
 [package]
 name = "stryke-k8s-helper"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Kubernetes bridge binary for the stryke `k8s` package."
 authors = ["MenkeTechnologies"]
