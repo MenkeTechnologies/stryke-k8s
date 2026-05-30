@@ -262,7 +262,7 @@ Output:
 
 ```sh
 cargo test                                   # compiles, no live cluster
-KUBECONFIG=~/.kube/config s test t/          # 9-test live round-trip
+KUBECONFIG=~/.kube/config s test t/          # live round-trip
 ```
 
 Tests use a unique `stryke-test-$$` namespace and tear it down at exit.
@@ -295,14 +295,14 @@ stryke-k8s/
   stryke.toml                      # stryke package manifest
   Cargo.toml                       # Rust helper crate manifest
   Makefile
-  src/main.rs                      # single-file helper, ~600 LOC
+  src/main.rs                      # single-file helper
   lib/
     K8s.stk                        # `use K8s`
   bin/
     k8s.stk                        # `k8s` CLI
     k8s-build.stk
   t/
-    test_k8s.stk                   # 9-test live round-trip
+    test_k8s.stk                   # live round-trip
   examples/
     get.stk
     apply.stk
