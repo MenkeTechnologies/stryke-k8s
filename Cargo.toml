@@ -6,6 +6,7 @@ description = "Kubernetes bridge binary for the stryke `k8s` package."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-k8s"
+homepage = "https://menketechnologies.github.io/stryke-k8s/"
 publish = false
 
 [[bin]]
