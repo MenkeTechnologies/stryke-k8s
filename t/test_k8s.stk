@@ -8,7 +8,7 @@
 
 use K8s
 
-my $have_cdylib = eval { K8s::pkg_version(); 1 }
+val $have_cdylib = eval { K8s::pkg_version(); 1 }
 unless ($have_cdylib) {
     p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
     exit 0
@@ -19,12 +19,12 @@ unless (eval { K8s::ping() }) {
     exit 0
 }
 
-my $ns = "stryke-test-$$"
+val $ns = "stryke-test-$$"
 p "1..9"
-my $i = 0
+var $i = 0
 
 # 1. apply Namespace
-my $r
+var $r
 eval {
     $r = K8s::apply({
         apiVersion => "v1",
@@ -39,7 +39,7 @@ p $@ ? "not ok $i - apply ns: $@" :
             : "not ok $i - apply ns wrong shape")
 
 # 2. version
-my $v
+var $v
 eval { $v = K8s::version() }
 $i++
 p $@ ? "not ok $i - version: $@" :
@@ -61,7 +61,7 @@ p $@ ? "not ok $i - apply cm: $@" :
             : "not ok $i - cm data wrong")
 
 # 4. get configmaps (list)
-my @cms
+var @cms
 eval { @cms = K8s::get("configmaps", namespace => $ns) }
 $i++
 p $@ ? "not ok $i - get cm: $@" :
@@ -70,7 +70,7 @@ p $@ ? "not ok $i - get cm: $@" :
             : "not ok $i - get cm: cfg missing")
 
 # 5. get-one configmap
-my $one
+var $one
 eval { $one = K8s::get_one("configmaps", "cfg", namespace => $ns) }
 $i++
 p $@ ? "not ok $i - get-one cm: $@" :
@@ -115,7 +115,7 @@ p $@ ? "not ok $i - scale: $@" :
             : "not ok $i - scale wrong: " . to_json($r))
 
 # 8. api_resources includes core/v1/Pod
-my @ar
+var @ar
 eval { @ar = K8s::api_resources() }
 $i++
 p $@ ? "not ok $i - api-resources: $@" :

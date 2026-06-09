@@ -5,7 +5,7 @@
 
 use K8s
 
-my $ns = "stryke-demo"
+val $ns = "stryke-demo"
 
 K8s::apply { apiVersion => "v1", kind => "Namespace", metadata => { name => $ns } }
 p "applied namespace $ns"
@@ -55,5 +55,5 @@ K8s::apply {
 p "applied service echo"
 
 p "scaling echo → 3"
-my $r = K8s::scale "deploy", "echo", 3, namespace => $ns
+val $r = K8s::scale "deploy", "echo", 3, namespace => $ns
 p "  spec.replicas = $r->{spec}{replicas}"

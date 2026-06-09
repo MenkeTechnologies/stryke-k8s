@@ -22,7 +22,7 @@ package K8s
 
 ## Decode the cdylib's JSON return; die on `{error}` payload.
 fn K8s::_decode ($name, $json) {
-    my $o = from_json $json
+    val $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
         die "K8s::$name: $o->{error}"
     }
@@ -31,7 +31,7 @@ fn K8s::_decode ($name, $json) {
 
 ## Build the FFI request hash by merging the caller's connection opts.
 fn K8s::_req ($extra, $opts) {
-    my %r = %$extra
+    var %r = %$extra
     $r{context} = $opts->{context} if exists $opts->{context} && defined $opts->{context}
     \%r
 }
@@ -50,13 +50,13 @@ fn K8s::version (%opts) {
 
 ## Connectivity probe — returns 1 on success, 0 on failure.
 fn K8s::ping (%opts) {
-    my $o = K8s::_decode("ping", k8s__ping(to_json(K8s::_req({}, \%opts))))
+    val $o = K8s::_decode("ping", k8s__ping(to_json(K8s::_req({}, \%opts))))
     $o->{ok} ? 1 : 0
 }
 
 ## Array of context names from the kubeconfig.
 fn K8s::contexts (%opts) {
-    my $o = K8s::_decode("contexts", k8s__contexts(to_json(K8s::_req({}, \%opts))))
+    val $o = K8s::_decode("contexts", k8s__contexts(to_json(K8s::_req({}, \%opts))))
     @{ $o->{contexts} }
 }
 
@@ -68,13 +68,13 @@ fn K8s::current_context (%opts) {
 
 ## List namespaces (cluster-scoped).
 fn K8s::namespaces (%opts) {
-    my $o = K8s::_decode("namespaces", k8s__namespaces(to_json(K8s::_req({}, \%opts))))
+    val $o = K8s::_decode("namespaces", k8s__namespaces(to_json(K8s::_req({}, \%opts))))
     @{ $o->{namespaces} }
 }
 
 ## Array of discoverable kinds with group/version/scope.
 fn K8s::api_resources (%opts) {
-    my $o = K8s::_decode("api_resources",
+    val $o = K8s::_decode("api_resources",
         k8s__api_resources(to_json(K8s::_req({}, \%opts))))
     @{ $o->{resources} }
 }
@@ -83,14 +83,14 @@ fn K8s::api_resources (%opts) {
 
 ## List resources of $kind in `namespace` (or default).
 fn K8s::get ($kind, %opts) {
-    my $r = K8s::_req({ kind => $kind, namespace => $opts{namespace} }, \%opts)
-    my $o = K8s::_decode("get", k8s__get(to_json($r)))
+    val $r = K8s::_req({ kind => $kind, namespace => $opts{namespace} }, \%opts)
+    val $o = K8s::_decode("get", k8s__get(to_json($r)))
     @{ $o->{items} }
 }
 
 ## Fetch one resource by $kind + $name.
 fn K8s::get_one ($kind, $name, %opts) {
-    my $r = K8s::_req(
+    val $r = K8s::_req(
         { kind => $kind, name => $name, namespace => $opts{namespace} },
         \%opts
     )
@@ -119,7 +119,7 @@ fn K8s::apply ($doc, %opts) {
 
 ## Delete by $kind + $name.
 fn K8s::delete_resource ($kind, $name, %opts) {
-    my $r = K8s::_req(
+    val $r = K8s::_req(
         { kind => $kind, name => $name, namespace => $opts{namespace} },
         \%opts
     )
@@ -128,7 +128,7 @@ fn K8s::delete_resource ($kind, $name, %opts) {
 
 ## Patch `spec.replicas` to $replicas on $kind $name.
 fn K8s::scale ($kind, $name, $replicas, %opts) {
-    my $r = K8s::_req(
+    val $r = K8s::_req(
         { kind => $kind, name => $name, replicas => $replicas, namespace => $opts{namespace} },
         \%opts
     )
@@ -140,7 +140,7 @@ fn K8s::scale ($kind, $name, $replicas, %opts) {
 ## Snapshot logs of a pod. Requires `namespace => $ns`.
 fn K8s::logs ($pod, %opts) {
     die "K8s::logs: namespace => 'ns' required" unless defined $opts{namespace}
-    my $r = K8s::_req(
+    val $r = K8s::_req(
         { pod => $pod, namespace => $opts{namespace},
           container => $opts{container}, tail => $opts{tail} },
         \%opts
