@@ -13,8 +13,14 @@ use K8s
 val $pkg_version = K8s::pkg_version()
 assert_ok $pkg_version, "K8s::pkg_version returns truthy (cdylib loaded)"
 
-# ── cluster liveness ────────────────────────────────────────────────
-val $alive = eval { K8s::ping() }
+# ── cluster liveness + write-permission probe ───────────────────────
+# Connected clusters without RBAC for namespace patch are common (GKE
+# read-only auth); guard the live block so a forbidden apply doesn't
+# pollute the test report — eval the probe and the whole block.
+val $alive = eval { K8s::ping() && eval { K8s::apply({
+    apiVersion => "v1", kind => "Namespace",
+    metadata => { name => "stryke-test-probe-$$" },
+}); K8s::delete_resource("namespace", "stryke-test-probe-$$"); 1 } }
 
 if ($alive) {
     val $ns = "stryke-test-$$"
@@ -82,7 +88,7 @@ if ($alive) {
 
     # 9. delete Namespace (cascades everything)
     val $del = K8s::delete_resource("namespace", $ns)
-    assert_match $del->{status}, qr/Deleting|Done/, "delete Namespace: status Deleting/Done"
+    assert_match qr/Deleting|Done/, $del->{status}, "delete Namespace: status Deleting/Done"
 }
 
 test_run
