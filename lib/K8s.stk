@@ -20,6 +20,7 @@ package K8s
 
 # ── error dispatch ────────────────────────────────────────────────────
 
+## Decode the cdylib's JSON return; die on `{error}` payload.
 fn K8s::_decode ($name, $json) {
     my $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
@@ -28,6 +29,7 @@ fn K8s::_decode ($name, $json) {
     $o
 }
 
+## Build the FFI request hash by merging the caller's connection opts.
 fn K8s::_req ($extra, $opts) {
     my %r = %$extra
     $r{context} = $opts->{context} if exists $opts->{context} && defined $opts->{context}
@@ -36,34 +38,41 @@ fn K8s::_req ($extra, $opts) {
 
 # ── version + discovery ──────────────────────────────────────────────
 
+## Return the cdylib's `CARGO_PKG_VERSION` string.
 fn K8s::pkg_version {
     K8s::_decode("pkg_version", k8s__pkg_version("{}"))->{version}
 }
 
+## Return the package version string.
 fn K8s::version (%opts) {
     K8s::_decode("version", k8s__version(to_json(K8s::_req({}, \%opts))))
 }
 
+## Connectivity probe — returns 1 on success, 0 on failure.
 fn K8s::ping (%opts) {
     my $o = K8s::_decode("ping", k8s__ping(to_json(K8s::_req({}, \%opts))))
     $o->{ok} ? 1 : 0
 }
 
+## Array of context names from the kubeconfig.
 fn K8s::contexts (%opts) {
     my $o = K8s::_decode("contexts", k8s__contexts(to_json(K8s::_req({}, \%opts))))
     @{ $o->{contexts} }
 }
 
+## Active context name from the kubeconfig.
 fn K8s::current_context (%opts) {
     K8s::_decode("current_context",
         k8s__current_context(to_json(K8s::_req({}, \%opts))))->{context}
 }
 
+## List namespaces (cluster-scoped).
 fn K8s::namespaces (%opts) {
     my $o = K8s::_decode("namespaces", k8s__namespaces(to_json(K8s::_req({}, \%opts))))
     @{ $o->{namespaces} }
 }
 
+## Array of discoverable kinds with group/version/scope.
 fn K8s::api_resources (%opts) {
     my $o = K8s::_decode("api_resources",
         k8s__api_resources(to_json(K8s::_req({}, \%opts))))
@@ -72,12 +81,14 @@ fn K8s::api_resources (%opts) {
 
 # ── get / list ──────────────────────────────────────────────────────
 
+## List resources of $kind in `namespace` (or default).
 fn K8s::get ($kind, %opts) {
     my $r = K8s::_req({ kind => $kind, namespace => $opts{namespace} }, \%opts)
     my $o = K8s::_decode("get", k8s__get(to_json($r)))
     @{ $o->{items} }
 }
 
+## Fetch one resource by $kind + $name.
 fn K8s::get_one ($kind, $name, %opts) {
     my $r = K8s::_req(
         { kind => $kind, name => $name, namespace => $opts{namespace} },
@@ -88,21 +99,25 @@ fn K8s::get_one ($kind, $name, %opts) {
 
 # ── write paths ─────────────────────────────────────────────────────
 
+## Apply a YAML/JSON doc as `create` semantics.
 fn K8s::create ($doc, %opts) {
     K8s::_decode("create",
         k8s__create(to_json(K8s::_req({ doc => $doc }, \%opts))))
 }
 
+## Replace a resource (must already exist).
 fn K8s::replace ($doc, %opts) {
     K8s::_decode("replace",
         k8s__replace(to_json(K8s::_req({ doc => $doc }, \%opts))))
 }
 
+## Server-side apply — idempotent declarative reconcile.
 fn K8s::apply ($doc, %opts) {
     K8s::_decode("apply",
         k8s__apply(to_json(K8s::_req({ doc => $doc }, \%opts))))
 }
 
+## Delete by $kind + $name.
 fn K8s::delete_resource ($kind, $name, %opts) {
     my $r = K8s::_req(
         { kind => $kind, name => $name, namespace => $opts{namespace} },
@@ -111,6 +126,7 @@ fn K8s::delete_resource ($kind, $name, %opts) {
     K8s::_decode("delete", k8s__delete(to_json($r)))
 }
 
+## Patch `spec.replicas` to $replicas on $kind $name.
 fn K8s::scale ($kind, $name, $replicas, %opts) {
     my $r = K8s::_req(
         { kind => $kind, name => $name, replicas => $replicas, namespace => $opts{namespace} },
@@ -121,6 +137,7 @@ fn K8s::scale ($kind, $name, $replicas, %opts) {
 
 # ── logs ────────────────────────────────────────────────────────────
 
+## Snapshot logs of a pod. Requires `namespace => $ns`.
 fn K8s::logs ($pod, %opts) {
     die "K8s::logs: namespace => 'ns' required" unless defined $opts{namespace}
     my $r = K8s::_req(
@@ -131,14 +148,17 @@ fn K8s::logs ($pod, %opts) {
     K8s::_decode("logs", k8s__logs(to_json($r)))->{logs}
 }
 
+## Streaming logs — deferred in v0.2.0 cdylib.
 fn K8s::logs_follow ($pod, %opts) {
     die "K8s::logs_follow: streaming ops are deferred in v0.2.0 cdylib"
 }
 
+## Streaming resource watch — deferred in v0.2.0 cdylib.
 fn K8s::watch ($kind, %opts) {
     die "K8s::watch: streaming ops are deferred in v0.2.0 cdylib"
 }
 
+## Streaming exec into pod — deferred in v0.2.0 cdylib.
 fn K8s::exec ($pod, $cmd, %opts) {
     die "K8s::exec: streaming ops are deferred in v0.2.0 cdylib"
 }
