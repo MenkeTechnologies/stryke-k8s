@@ -1,5 +1,5 @@
 [package]
-name = "k8s"
+name = "stryke-k8s"
 version = "0.2.0"
 description = "Kubernetes client for stryke. Get / apply / delete / scale / logs against any kubeconfig-reachable cluster. cdylib loaded in-process — persistent kube::Client cache across calls."
 authors = ["MenkeTechnologies"]
