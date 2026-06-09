@@ -1,86 +1,56 @@
-# t/test_k8s.stk — round-trip against a live Kubernetes cluster.
-#
-# Requires the cdylib to be loaded. Install once with `s pkg install -g .`
-# from the package root so stryke's FFI bridge dlopens
-# lib/libstryke_k8s.{dylib,so} on `use K8s`.
-#
-# Uses a unique namespace `stryke-test-$$` and tears it down at exit.
+## t/test_k8s.stk — assertion tests for the stryke `K8s` package.
+##
+## Uses stryke's native test framework (`assert_*` + `test_run`).
+## Requires the cdylib to be loaded — install once with `s pkg install -g .`
+## so stryke's FFI bridge dlopens `lib/libstryke_k8s.{dylib,so}` on
+## `use K8s`. Live tests provision a unique namespace `stryke-test-$$` and
+## tear it down at exit; requires a reachable cluster (KUBECONFIG /
+## current-context).
 
 use K8s
 
-val $have_cdylib = eval { K8s::pkg_version(); 1 }
-unless ($have_cdylib) {
-    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
-    exit 0
-}
+# ── permission-free: cdylib reachable ───────────────────────────────
+val $pkg_version = K8s::pkg_version()
+assert_ok $pkg_version, "K8s::pkg_version returns truthy (cdylib loaded)"
 
-unless (eval { K8s::ping() }) {
-    p "1..0 # SKIP no reachable cluster (check KUBECONFIG / current-context)"
-    exit 0
-}
+# ── cluster liveness ────────────────────────────────────────────────
+val $alive = eval { K8s::ping() }
 
-val $ns = "stryke-test-$$"
-p "1..9"
-var $i = 0
+if ($alive) {
+    val $ns = "stryke-test-$$"
 
-# 1. apply Namespace
-var $r
-eval {
-    $r = K8s::apply({
+    # 1. apply Namespace
+    val $ns_obj = K8s::apply({
         apiVersion => "v1",
         kind       => "Namespace",
         metadata   => { name => $ns, labels => { "stryke.io/test" => "1" } },
     })
-}
-$i++
-p $@ ? "not ok $i - apply ns: $@" :
-       (defined $r->{metadata}{name} && $r->{metadata}{name} eq $ns
-            ? "ok $i - apply Namespace"
-            : "not ok $i - apply ns wrong shape")
+    assert_eq $ns_obj->{metadata}{name}, $ns, "apply Namespace: name preserved"
 
-# 2. version
-var $v
-eval { $v = K8s::version() }
-$i++
-p $@ ? "not ok $i - version: $@" :
-       (defined $v->{gitVersion} ? "ok $i - version $v->{gitVersion}" : "not ok $i - version shape")
+    # 2. version
+    val $v = K8s::version()
+    assert_ok defined $v->{gitVersion}, "version returns gitVersion"
 
-# 3. apply ConfigMap
-eval {
-    $r = K8s::apply({
+    # 3. apply ConfigMap
+    val $cm = K8s::apply({
         apiVersion => "v1",
         kind       => "ConfigMap",
         metadata   => { name => "cfg", namespace => $ns },
         data       => { hello => "world", lang => "stryke" },
     })
-}
-$i++
-p $@ ? "not ok $i - apply cm: $@" :
-       (defined $r->{data}{hello} && $r->{data}{hello} eq "world"
-            ? "ok $i - apply ConfigMap"
-            : "not ok $i - cm data wrong")
+    assert_eq $cm->{data}{hello}, "world", "apply ConfigMap: hello=world"
 
-# 4. get configmaps (list)
-var @cms
-eval { @cms = K8s::get("configmaps", namespace => $ns) }
-$i++
-p $@ ? "not ok $i - get cm: $@" :
-       (grep { $_->{metadata}{name} eq "cfg" } @cms
-            ? "ok $i - get configmaps (#{len(@cms)} item(s))"
-            : "not ok $i - get cm: cfg missing")
+    # 4. get configmaps (list)
+    val @cms = K8s::get("configmaps", namespace => $ns)
+    val $found_cm = grep { $_->{metadata}{name} eq "cfg" } @cms
+    assert_ok $found_cm, "get configmaps: includes cfg"
 
-# 5. get-one configmap
-var $one
-eval { $one = K8s::get_one("configmaps", "cfg", namespace => $ns) }
-$i++
-p $@ ? "not ok $i - get-one cm: $@" :
-       (defined $one && $one->{data}{lang} eq "stryke"
-            ? "ok $i - get-one ConfigMap"
-            : "not ok $i - get-one wrong")
+    # 5. get-one configmap
+    val $one = K8s::get_one("configmaps", "cfg", namespace => $ns)
+    assert_eq $one->{data}{lang}, "stryke", "get_one ConfigMap: data.lang"
 
-# 6. apply Deployment (busybox sleep, replicas=1)
-eval {
-    $r = K8s::apply({
+    # 6. apply Deployment
+    val $dep = K8s::apply({
         apiVersion => "apps/v1",
         kind       => "Deployment",
         metadata   => { name => "sleeper", namespace => $ns },
@@ -99,34 +69,20 @@ eval {
             },
         },
     })
+    assert_ok defined $dep->{metadata}{name}, "apply Deployment: metadata.name present"
+
+    # 7. scale Deployment to 2
+    val $scaled = K8s::scale("deploy", "sleeper", 2, namespace => $ns)
+    assert_eq $scaled->{spec}{replicas}, 2, "scale: replicas=2"
+
+    # 8. api_resources includes core/v1/Pod
+    val @ar = K8s::api_resources()
+    val $found_pod = grep { $_->{kind} eq "Pod" && $_->{version} eq "v1" } @ar
+    assert_ok $found_pod, "api_resources: includes core/v1/Pod"
+
+    # 9. delete Namespace (cascades everything)
+    val $del = K8s::delete_resource("namespace", $ns)
+    assert_match $del->{status}, qr/Deleting|Done/, "delete Namespace: status Deleting/Done"
 }
-$i++
-p $@ ? "not ok $i - apply deploy: $@" :
-       (defined $r->{metadata}{name}
-            ? "ok $i - apply Deployment"
-            : "not ok $i - deploy wrong shape")
 
-# 7. scale Deployment to 2
-eval { $r = K8s::scale("deploy", "sleeper", 2, namespace => $ns) }
-$i++
-p $@ ? "not ok $i - scale: $@" :
-       (defined $r->{spec}{replicas} && $r->{spec}{replicas} == 2
-            ? "ok $i - scale to 2"
-            : "not ok $i - scale wrong: " . to_json($r))
-
-# 8. api_resources includes core/v1/Pod
-var @ar
-eval { @ar = K8s::api_resources() }
-$i++
-p $@ ? "not ok $i - api-resources: $@" :
-       (grep { $_->{kind} eq "Pod" && $_->{version} eq "v1" } @ar
-            ? "ok $i - api-resources Pod present"
-            : "not ok $i - api-resources missing Pod")
-
-# 9. delete Namespace (cascades everything)
-eval { $r = K8s::delete_resource("namespace", $ns) }
-$i++
-p $@ ? "not ok $i - delete ns: $@" :
-       ($r->{status} =~ /Deleting|Done/
-            ? "ok $i - delete Namespace ($r->{status})"
-            : "not ok $i - delete ns: " . to_json($r))
+test_run

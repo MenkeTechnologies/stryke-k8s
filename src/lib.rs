@@ -444,3 +444,73 @@ pub extern "C" fn k8s__scale(args: *const c_char) -> *const c_char {
 pub extern "C" fn k8s__logs(args: *const c_char) -> *const c_char {
     ffi_call_async(args, op_logs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct Pod {
+        name: String,
+        namespace: String,
+        status: String,
+    }
+
+    #[test]
+    fn to_value_renders_struct_fields() {
+        let v = to_value(Pod {
+            name: "nginx-0".into(),
+            namespace: "default".into(),
+            status: "Running".into(),
+        });
+        assert_eq!(v["name"], json!("nginx-0"));
+        assert_eq!(v["namespace"], json!("default"));
+        assert_eq!(v["status"], json!("Running"));
+    }
+
+    #[test]
+    fn to_value_handles_primitives_and_vec() {
+        assert_eq!(to_value("v1.31.0"), json!("v1.31.0"));
+        assert_eq!(to_value(3_u64), json!(3));
+        assert_eq!(to_value(vec!["pod-a", "pod-b"]), json!(["pod-a", "pod-b"]));
+    }
+
+    #[test]
+    fn to_value_option_none_renders_as_null() {
+        let none: Option<String> = None;
+        assert_eq!(to_value(none), json!(null));
+        assert_eq!(to_value(Some("v")), json!("v"));
+    }
+
+    /// Match the JSON-value pattern used in `op_apply`/`op_delete`:
+    /// `opts["kind"]` / `opts["namespace"]` extracted as `&str`. Drives
+    /// the kind-discovery + namespacing decision in `discover_kind` +
+    /// `dyn_api` — getting None vs Some(_) here changes the API surface
+    /// the op operates on.
+    fn extract_kind_and_ns(opts: &Value) -> (Option<&str>, Option<&str>) {
+        (opts["kind"].as_str(), opts["namespace"].as_str())
+    }
+
+    #[test]
+    fn opts_kind_extracted_when_present() {
+        let opts = json!({"kind": "Pod", "namespace": "kube-system"});
+        assert_eq!(
+            extract_kind_and_ns(&opts),
+            (Some("Pod"), Some("kube-system"))
+        );
+    }
+
+    #[test]
+    fn opts_kind_absent_when_missing() {
+        let opts = json!({"name": "foo"});
+        assert_eq!(extract_kind_and_ns(&opts), (None, None));
+    }
+
+    #[test]
+    fn opts_kind_absent_when_non_string() {
+        // `{"kind": 42}` shouldn't stringify the integer — only as_str survives.
+        let opts = json!({"kind": 42, "namespace": null});
+        assert_eq!(extract_kind_and_ns(&opts), (None, None));
+    }
+}
