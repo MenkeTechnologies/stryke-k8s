@@ -1,20 +1,20 @@
-# lib/K8s.stk — Kubernetes client for stryke (`use K8s`).
-#
-# Thin wrapper around the `stryke-k8s` cdylib's `k8s__*` exports. The
-# cdylib is dlopened in-process on first `use K8s` (see stryke's
-# `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
-# stryke-callable function via `rust_ffi::load_cdylib`.
-#
-# Replaces the v1 helper-binary model (fork(2) + exec(2) + fresh TLS+auth
-# handshake per call). The cdylib holds:
-#   * one shared tokio runtime
-#   * a kube::Client cache keyed by kubeconfig context
-# Back-to-back calls reuse the same client + underlying HTTP pool.
-#
-# v0.2.0 surface: 15 core ops (get/get_one, create/replace/apply, delete,
-# scale, logs, namespace/api-resource discovery). Streaming ops
-# (watch, logs --follow, exec) are deferred — they need a callback FFI
-# shape that v1's `FfiSig::StrToStr` doesn't model.
+## lib/K8s.stk — Kubernetes client for stryke (`use K8s`).
+##
+## Thin wrapper around the `stryke-k8s` cdylib's `k8s__*` exports. The
+## cdylib is dlopened in-process on first `use K8s` (see stryke's
+## `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+## stryke-callable function via `rust_ffi::load_cdylib`.
+##
+## Replaces the v1 helper-binary model (fork(2) + exec(2) + fresh TLS+auth
+## handshake per call). The cdylib holds:
+##   * one shared tokio runtime
+##   * a kube::Client cache keyed by kubeconfig context
+## Back-to-back calls reuse the same client + underlying HTTP pool.
+##
+## v0.2.0 surface: 15 core ops (get/get_one, create/replace/apply, delete,
+## scale, logs, namespace/api-resource discovery). Streaming ops
+## (watch, logs --follow, exec) are deferred — they need a callback FFI
+## shape that v1's `FfiSig::StrToStr` doesn't model.
 
 package K8s
 
