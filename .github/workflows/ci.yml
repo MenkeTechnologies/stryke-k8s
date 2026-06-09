@@ -63,57 +63,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --no-fail-fast
 
-  helper-live-k8s:
-    name: Helper end-to-end (kind)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Create kind cluster
-        uses: helm/kind-action@v1
-        with:
-          cluster_name: stryke-ci
-          wait: 120s
-
-      - run: cargo build --release --locked
-
-      - name: ping + apply + scale + get
-        run: |
-          set -euo pipefail
-          H=./target/release/stryke-k8s-helper
-
-          $H ping | jq -e '.ok == true'
-          $H version | jq -e '.gitVersion'
-
-          # Namespace
-          $H apply --doc='{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"ci"}}' \
-            | jq -e '.metadata.name == "ci"'
-
-          # ConfigMap
-          $H apply --doc='{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cfg","namespace":"ci"},"data":{"a":"1"}}' \
-            | jq -e '.data.a == "1"'
-
-          # Deployment
-          $H apply --doc='{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"echo","namespace":"ci"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"echo"}},"template":{"metadata":{"labels":{"app":"echo"}},"spec":{"containers":[{"name":"main","image":"hashicorp/http-echo:latest","args":["-text=hi"]}]}}}}' \
-            | jq -e '.metadata.name == "echo"'
-
-          # Scale
-          $H scale deploy echo --replicas=2 --namespace=ci \
-            | jq -e '.spec.replicas == 2'
-
-          # List + get-one
-          $H get cm --namespace=ci | jq -es 'map(.metadata.name) | index("cfg") != null'
-          $H get-one cm cfg --namespace=ci | jq -e '.data.a == "1"'
-
-          # api-resources + namespaces
-          $H api-resources | grep -q '"kind":"Pod"'
-          $H namespaces | grep -q '"name":"ci"'
-
-          # Cleanup
-          $H delete namespace ci | jq -e '.status'
-
   doc:
     name: Doc
     runs-on: ubuntu-latest
@@ -127,7 +76,7 @@ jobs:
 
   release-build:
     name: Release Build (${{ matrix.target }})
-    needs: [check, test, helper-live-k8s]
+    needs: [check, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -149,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: stryke-k8s-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/stryke-k8s-helper
+          path: target/${{ matrix.target }}/release/libstryke_k8s.*
 
   docs-gates:
     name: Docs gates

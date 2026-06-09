@@ -9,7 +9,7 @@ help:
 	  '  make release   - cargo build --release' \
 	  '  make debug     - cargo build' \
 	  '  make test      - cargo test then `s test t/`  (needs reachable cluster via KUBECONFIG)' \
-	  '  make install   - `s pkg install -g .` (registers k8s/k8s-build CLI launchers)' \
+	  '  make install   - `s pkg install -g .` (cdylib lands in ~/.stryke/store/k8s@<ver>/)' \
 	  '  make clean     - cargo clean'
 
 release:

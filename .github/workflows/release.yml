@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.2.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -16,73 +21,74 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    continue-on-error: ${{ matrix.allow_failure || false }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-latest
+            dylib: libstryke_k8s.so
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            cross: true
+            dylib: libstryke_k8s.so
+            allow_failure: true
           - os: macos-latest
             target: x86_64-apple-darwin
+            dylib: libstryke_k8s.dylib
           - os: macos-latest
             target: aarch64-apple-darwin
+            dylib: libstryke_k8s.dylib
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
-      - name: Install musl tools
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --locked
-      - name: Build (native)
-        if: '!matrix.cross'
-        run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --locked --target ${{ matrix.target }}
-      - name: Package
-        shell: bash
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build cdylib
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage release tarball
+        id: stage
         run: |
           set -euo pipefail
-          cd target/${{ matrix.target }}/release
-          strip stryke-k8s-helper 2>/dev/null || true
-          tar czf ../../../stryke-k8s-${{ github.ref_name }}-${{ matrix.target }}.tar.gz stryke-k8s-helper
-          cd ../../..
-          sha256sum stryke-k8s-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
-              > stryke-k8s-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
-      - uses: actions/upload-artifact@v6
-        with:
-          name: stryke-k8s-${{ matrix.target }}
-          path: |
-            stryke-k8s-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-            stryke-k8s-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          TAG="${{ steps.tag.outputs.tag }}"
+          TRIPLE="${{ matrix.target }}"
+          STEM="stryke-k8s-${TAG}-${TRIPLE}"
+          mkdir -p "staging/${STEM}/lib"
+          cp stryke.toml "staging/${STEM}/"
+          cp lib/K8s.stk "staging/${STEM}/lib/"
+          cp "target/${TRIPLE}/release/${{ matrix.dylib }}" "staging/${STEM}/lib/"
+          ARCHIVE="${STEM}.tar.gz"
+          tar -C staging -czf "${ARCHIVE}" "${STEM}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ARCHIVE}" | awk '{print $1}' > "${ARCHIVE}.sha256"
+          else
+            shasum -a 256 "${ARCHIVE}" | awk '{print $1}' > "${ARCHIVE}.sha256"
+          fi
+          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
 
-  publish:
-    name: Publish Release
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          path: artifacts
-          merge-multiple: true
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create ${{ github.ref_name }} \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
-            artifacts/*.tar.gz \
-            artifacts/*.tar.gz.sha256
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            ${{ steps.stage.outputs.archive }}
+            ${{ steps.stage.outputs.archive }}.sha256
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false

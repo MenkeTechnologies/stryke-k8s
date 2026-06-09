@@ -1,15 +1,32 @@
 [package]
 name = "k8s"
-version = "0.1.0"
-description = "Kubernetes client for stryke. Get / apply / delete / scale / logs / watch / exec against any kubeconfig-reachable cluster."
+version = "0.2.0"
+description = "Kubernetes client for stryke. Get / apply / delete / scale / logs against any kubeconfig-reachable cluster. cdylib loaded in-process — persistent kube::Client cache across calls."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-k8s"
 edition = "2026"
 
-[bin]
-k8s = "bin/k8s.stk"
-k8s-build = "bin/k8s-build.stk"
+[ffi]
+lib-name = "stryke_k8s"
+namespace = "K8s"
+exports = [
+    "k8s__pkg_version",
+    "k8s__version",
+    "k8s__ping",
+    "k8s__contexts",
+    "k8s__current_context",
+    "k8s__namespaces",
+    "k8s__api_resources",
+    "k8s__get",
+    "k8s__get_one",
+    "k8s__create",
+    "k8s__replace",
+    "k8s__apply",
+    "k8s__delete",
+    "k8s__scale",
+    "k8s__logs",
+]
 
 [scripts]
 build = "cargo build --release"

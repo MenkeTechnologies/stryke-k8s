@@ -42,6 +42,14 @@ minikube, EKS, GKE, AKS, OpenShift, vanilla). Opt-in package tier.
 
 ## [0x00] Install
 
+From a release (no rustc on the consumer machine):
+
+```sh
+s pkg install -g github.com/MenkeTechnologies/stryke-k8s
+```
+
+From a local checkout:
+
 ```sh
 cd ~/projects/stryke-k8s
 cargo build --release
@@ -53,6 +61,11 @@ Or:
 ```sh
 make install
 ```
+
+The cdylib is dlopened in-process on first `use K8s`. A shared tokio
+runtime + `kube::Client` cache keyed by kubeconfig context is held in
+`OnceCell` for the life of the process — no fork-per-call, no fresh
+TLS+auth handshake each time.
 
 ## [0x01] Quick start
 
@@ -233,21 +246,32 @@ K8s::version          %opts → \%info        # gitVersion, platform, etc.
 K8s::ping             %opts → 1 | ""
 K8s::contexts         %opts → @{ {name, cluster, user, namespace, current} }
 K8s::current_context  %opts → $name
-K8s::helper_path()    → $abs_path
-K8s::ensure_built()   → $abs_path
+K8s::pkg_version()    → $version_string    # cdylib's CARGO_PKG_VERSION
 ```
 
-## [0x05] Helper protocol
+## [0x05] FFI layer
 
-```sh
-stryke-k8s-helper get pods --namespace=default
-stryke-k8s-helper get-one pod echo-7d9f --namespace=default
-stryke-k8s-helper apply --doc='{"apiVersion":"v1","kind":"ConfigMap",...}'
-stryke-k8s-helper scale deploy echo --replicas=5 --namespace=ci
-stryke-k8s-helper logs echo-7d9f --namespace=ci --follow
-stryke-k8s-helper watch pods --namespace=ci
-stryke-k8s-helper exec echo-7d9f --namespace=ci --cmd sh -- -c uptime
-```
+Each `K8s::*` wrapper builds a JSON args dict and calls a sibling
+`k8s__*` symbol resolved out of `libstryke_k8s.{dylib,so}`. The cdylib
+is dlopened in-process on first `use K8s` (via stryke's
+`pkg::commands::try_load_ffi_for` resolver hook) and exposes 15 entry
+points covering version/discovery, get/list, write paths (create / replace
+/ apply / delete / scale), and snapshot logs.
+
+**Persistent state:**
+
+* `RUNTIME` — one shared `tokio` multi-thread runtime drives every
+  async call.
+* `CLIENTS` — `kube::Client` cache keyed by kubeconfig context. v1
+  helper rebuilt the client (TLS+auth handshake) per fork; this reuses
+  the same client + underlying HTTP pool across calls.
+
+**Deferred from v0.2.0:** streaming-only ops (`watch`, `logs --follow`,
+`exec`). These need a callback FFI shape that v1's `FfiSig::StrToStr`
+doesn't model. Calling them dies with a clear message.
+
+<details>
+<summary>v1 wire shape (historical)</summary>
 
 Output:
 
@@ -257,6 +281,8 @@ Output:
   `ping`, `current-context` → single JSON
 * `logs` (buffered) → raw text
 * errors → stderr + non-zero exit
+
+</details>
 
 ## [0x06] Tests
 

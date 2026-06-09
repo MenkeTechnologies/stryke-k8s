@@ -1,20 +1,20 @@
 # t/test_k8s.stk — round-trip against a live Kubernetes cluster.
 #
-# Skips when the helper isn't built or no cluster is reachable. Local dev:
-#   kind create cluster --name stryke
-#   docker run --rm -v $PWD/k3s:/output rancher/k3s:latest server --disable=traefik
+# Requires the cdylib to be loaded. Install once with `s pkg install -g .`
+# from the package root so stryke's FFI bridge dlopens
+# lib/libstryke_k8s.{dylib,so} on `use K8s`.
 #
 # Uses a unique namespace `stryke-test-$$` and tears it down at exit.
 
-require "./lib/K8s.stk"
+use K8s
 
-my $have_helper = eval { K8s::helper_path(); 1 }
-unless ($have_helper) {
-    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+my $have_cdylib = eval { K8s::pkg_version(); 1 }
+unless ($have_cdylib) {
+    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
     exit 0
 }
 
-unless (K8s::ping()) {
+unless (eval { K8s::ping() }) {
     p "1..0 # SKIP no reachable cluster (check KUBECONFIG / current-context)"
     exit 0
 }

@@ -1,325 +1,146 @@
-# lib/K8s.stk — Kubernetes client for stryke.
+# lib/K8s.stk — Kubernetes client for stryke (`use K8s`).
 #
-# Wraps the `stryke-k8s-helper` Rust binary (kube-rs + k8s-openapi).
-# Output is NDJSON for list / watch / log-follow streams, single JSON
-# otherwise. `kind` accepts short forms (`pods`, `svc`, `deploy`) or
-# strict `group/version/Kind` GVK (`apps/v1/Deployment`).
+# Thin wrapper around the `stryke-k8s` cdylib's `k8s__*` exports. The
+# cdylib is dlopened in-process on first `use K8s` (see stryke's
+# `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+# stryke-callable function via `rust_ffi::load_cdylib`.
 #
-# Connection: $KUBECONFIG / ~/.kube/config or in-cluster ServiceAccount.
-# Override per-call with %opts: context, kubeconfig, namespace.
+# Replaces the v1 helper-binary model (fork(2) + exec(2) + fresh TLS+auth
+# handshake per call). The cdylib holds:
+#   * one shared tokio runtime
+#   * a kube::Client cache keyed by kubeconfig context
+# Back-to-back calls reuse the same client + underlying HTTP pool.
+#
+# v0.2.0 surface: 15 core ops (get/get_one, create/replace/apply, delete,
+# scale, logs, namespace/api-resource discovery). Streaming ops
+# (watch, logs --follow, exec) are deferred — they need a callback FFI
+# shape that v1's `FfiSig::StrToStr` doesn't model.
 
 package K8s
 
-our $HELPER
+# ── error dispatch ────────────────────────────────────────────────────
 
-fn K8s::pkg_root {
-    my @parts = split "/", __FILE__
-    pop @parts
-    pop @parts
-    my $root = join "/", @parts
-    $root ne "" ? $root : "."
+fn K8s::_decode ($name, $json) {
+    my $o = from_json $json
+    if (ref $o eq "HASH" && exists $o->{error}) {
+        die "K8s::$name: $o->{error}"
+    }
+    $o
 }
 
-fn K8s::helper_path {
-    return $K8s::HELPER if defined $K8s::HELPER && -x $K8s::HELPER
-
-    if (exists $ENV{STRYKE_K8S_HELPER} && $ENV{STRYKE_K8S_HELPER} ne "") {
-        my $p = $ENV{STRYKE_K8S_HELPER}
-        die "stryke-k8s: STRYKE_K8S_HELPER=$p is not an executable file" unless -x $p
-        $K8s::HELPER = $p
-        return $p
-    }
-
-    my $root = K8s::pkg_root()
-    for my $cand (
-        "$root/target/release/stryke-k8s-helper",
-        "$root/target/debug/stryke-k8s-helper",
-        "$root/bin/stryke-k8s-helper",
-    ) {
-        if (-x $cand) {
-            $K8s::HELPER = $cand
-            return $cand
-        }
-    }
-
-    my $which = qx{command -v stryke-k8s-helper 2>/dev/null}
-    chomp $which
-    if ($which ne "" && -x $which) {
-        $K8s::HELPER = $which
-        return $which
-    }
-
-    die "stryke-k8s: helper binary not found.\n" .
-        "  Build it once with:  cd $root && cargo build --release\n" .
-        "  Or set STRYKE_K8S_HELPER=/path/to/stryke-k8s-helper\n"
+fn K8s::_req ($extra, $opts) {
+    my %r = %$extra
+    $r{context} = $opts->{context} if exists $opts->{context} && defined $opts->{context}
+    \%r
 }
 
-fn K8s::ensure_built {
-    my $root = K8s::pkg_root()
-    for my $cand ("$root/target/release/stryke-k8s-helper",
-                  "$root/target/debug/stryke-k8s-helper") {
-        return $cand if -x $cand
-    }
-    return K8s::helper_path() if exists $ENV{STRYKE_K8S_HELPER}
+# ── version + discovery ──────────────────────────────────────────────
 
-    p "stryke-k8s: building helper (cargo build --release)..."
-    my $rc = system "cd " . K8s::_shq($root) . " && cargo build --release"
-    die "stryke-k8s: cargo build failed (rc=$rc)" if $rc != 0
-    K8s::helper_path()
-}
-
-fn K8s::_shq ($s) {
-    my $t = $s
-    $t =~ s/'/'\\''/g
-    "'$t'"
-}
-
-fn K8s::_conn_argv ($o) {
-    my @argv = (K8s::_shq(K8s::helper_path()))
-    push @argv, "--context",            K8s::_shq($o->{context})           if defined $o->{context}
-    push @argv, "--kubeconfig",         K8s::_shq($o->{kubeconfig})        if defined $o->{kubeconfig}
-    push @argv, "--default-namespace",  K8s::_shq($o->{default_namespace}) if defined $o->{default_namespace}
-    @argv
-}
-
-fn K8s::_drain_ndjson ($fh) {
-    my @rows
-    while (my $line = <$fh>) {
-        chomp $line
-        next if $line eq ""
-        push @rows, from_json $line
-    }
-    @rows
-}
-
-fn K8s::_run_ndjson ($argv) {
-    my $cmd = join " ", @$argv
-    if ($ENV{STRYKE_K8S_DEBUG}) {
-        warn "DEBUG k8s cmd: $cmd\n"
-    }
-    open my $fh, "-|", $cmd or die "stryke-k8s: spawn failed: $!"
-    my @rows = K8s::_drain_ndjson $fh
-    close $fh or die "stryke-k8s: helper exited ($?)"
-    @rows
-}
-
-fn K8s::_run_json ($argv) {
-    my $cmd = join " ", @$argv
-    if ($ENV{STRYKE_K8S_DEBUG}) {
-        warn "DEBUG k8s cmd: $cmd\n"
-    }
-    my $out = qx{$cmd}
-    die "stryke-k8s: helper exited ($?)" if $? != 0
-    from_json $out
-}
-
-fn K8s::_run_raw ($argv) {
-    my $cmd = join " ", @$argv
-    if ($ENV{STRYKE_K8S_DEBUG}) {
-        warn "DEBUG k8s cmd: $cmd\n"
-    }
-    my $out = qx{$cmd}
-    die "stryke-k8s: helper exited ($?)" if $? != 0
-    $out
+fn K8s::pkg_version {
+    K8s::_decode("pkg_version", k8s__pkg_version("{}"))->{version}
 }
 
 fn K8s::version (%opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "version"
-    K8s::_run_json(\@argv)
+    K8s::_decode("version", k8s__version(to_json(K8s::_req({}, \%opts))))
 }
 
 fn K8s::ping (%opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "ping"
-    my $cmd = join " ", @argv
-    my $out = qx{$cmd 2>/dev/null}
-    $? == 0 && $out =~ /"ok":\s*true/
+    my $o = K8s::_decode("ping", k8s__ping(to_json(K8s::_req({}, \%opts))))
+    $o->{ok} ? 1 : 0
 }
 
 fn K8s::contexts (%opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "contexts"
-    K8s::_run_ndjson(\@argv)
+    my $o = K8s::_decode("contexts", k8s__contexts(to_json(K8s::_req({}, \%opts))))
+    @{ $o->{contexts} }
 }
 
 fn K8s::current_context (%opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "current-context"
-    K8s::_run_json(\@argv)->{current_context}
-}
-
-fn K8s::api_resources (%opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "api-resources"
-    K8s::_run_ndjson(\@argv)
+    K8s::_decode("current_context",
+        k8s__current_context(to_json(K8s::_req({}, \%opts))))->{context}
 }
 
 fn K8s::namespaces (%opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "namespaces"
-    K8s::_run_ndjson(\@argv)
+    my $o = K8s::_decode("namespaces", k8s__namespaces(to_json(K8s::_req({}, \%opts))))
+    @{ $o->{namespaces} }
 }
 
-# ---------------------------------------------------------------------------
-# Read paths
-# ---------------------------------------------------------------------------
+fn K8s::api_resources (%opts) {
+    my $o = K8s::_decode("api_resources",
+        k8s__api_resources(to_json(K8s::_req({}, \%opts))))
+    @{ $o->{resources} }
+}
 
-# K8s::get $kind, %opts
-#   opts: namespace, all_namespaces (bool), label_selector, field_selector, limit
+# ── get / list ──────────────────────────────────────────────────────
+
 fn K8s::get ($kind, %opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "get", K8s::_shq($kind)
-    push @argv, "--namespace",      K8s::_shq($opts{namespace})       if defined $opts{namespace}
-    push @argv, "--all-namespaces"                                     if $opts{all_namespaces}
-    push @argv, "--label-selector", K8s::_shq($opts{label_selector})   if defined $opts{label_selector}
-    push @argv, "--field-selector", K8s::_shq($opts{field_selector})   if defined $opts{field_selector}
-    push @argv, "--limit",          K8s::_shq($opts{limit})            if defined $opts{limit}
-    K8s::_run_ndjson(\@argv)
+    my $r = K8s::_req({ kind => $kind, namespace => $opts{namespace} }, \%opts)
+    my $o = K8s::_decode("get", k8s__get(to_json($r)))
+    @{ $o->{items} }
 }
 
 fn K8s::get_one ($kind, $name, %opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "get-one", K8s::_shq($kind), K8s::_shq($name)
-    push @argv, "--namespace", K8s::_shq($opts{namespace}) if defined $opts{namespace}
-    my $r = K8s::_run_json(\@argv)
-    defined $r && ref($r) eq "HASH" ? $r : undef
+    my $r = K8s::_req(
+        { kind => $kind, name => $name, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("get_one", k8s__get_one(to_json($r)))
 }
 
-# K8s::watch $kind, callback => sub ($evt) { … }, %opts
-#   evt: { type => "APPLY"|"DELETE"|"INIT"|"INIT_APPLY"|"INIT_DONE", object => \%doc? }
-fn K8s::watch ($kind, %opts) {
-    die "K8s::watch: callback => sub { … } required" unless defined $opts{callback}
-    my $cb = $opts{callback}
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "watch", K8s::_shq($kind)
-    push @argv, "--namespace",      K8s::_shq($opts{namespace})     if defined $opts{namespace}
-    push @argv, "--label-selector", K8s::_shq($opts{label_selector}) if defined $opts{label_selector}
-    push @argv, "--field-selector", K8s::_shq($opts{field_selector}) if defined $opts{field_selector}
-    my $cmd = join " ", @argv
-    my $n = 0
-    open my $fh, "-|", $cmd or die "K8s::watch: spawn failed: $!"
-    while (my $line = <$fh>) {
-        chomp $line
-        next if $line eq ""
-        $cb->(from_json $line)
-        $n++
-    }
-    close $fh or die "K8s::watch: helper exited ($?)"
-    $n
-}
-
-# ---------------------------------------------------------------------------
-# Write paths
-# ---------------------------------------------------------------------------
-
-# Apply (server-side). $doc is a hashref with apiVersion/kind/metadata/...
-fn K8s::apply ($doc, %opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "apply", "--doc", K8s::_shq(to_json $doc)
-    push @argv, "--field-manager", K8s::_shq($opts{field_manager}) if defined $opts{field_manager}
-    push @argv, "--force"                                          if $opts{force}
-    push @argv, "--namespace", K8s::_shq($opts{namespace})         if defined $opts{namespace}
-    K8s::_run_json(\@argv)
-}
+# ── write paths ─────────────────────────────────────────────────────
 
 fn K8s::create ($doc, %opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "create", "--doc", K8s::_shq(to_json $doc)
-    push @argv, "--namespace", K8s::_shq($opts{namespace}) if defined $opts{namespace}
-    K8s::_run_json(\@argv)
+    K8s::_decode("create",
+        k8s__create(to_json(K8s::_req({ doc => $doc }, \%opts))))
 }
 
 fn K8s::replace ($doc, %opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "replace", "--doc", K8s::_shq(to_json $doc)
-    push @argv, "--namespace", K8s::_shq($opts{namespace}) if defined $opts{namespace}
-    K8s::_run_json(\@argv)
+    K8s::_decode("replace",
+        k8s__replace(to_json(K8s::_req({ doc => $doc }, \%opts))))
+}
+
+fn K8s::apply ($doc, %opts) {
+    K8s::_decode("apply",
+        k8s__apply(to_json(K8s::_req({ doc => $doc }, \%opts))))
 }
 
 fn K8s::delete_resource ($kind, $name, %opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "delete", K8s::_shq($kind), K8s::_shq($name)
-    push @argv, "--namespace",    K8s::_shq($opts{namespace})    if defined $opts{namespace}
-    push @argv, "--grace-period", K8s::_shq($opts{grace_period}) if defined $opts{grace_period}
-    push @argv, "--force"                                        if $opts{force}
-    K8s::_run_json(\@argv)
+    my $r = K8s::_req(
+        { kind => $kind, name => $name, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("delete", k8s__delete(to_json($r)))
 }
 
 fn K8s::scale ($kind, $name, $replicas, %opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "scale", K8s::_shq($kind), K8s::_shq($name),
-                 "--replicas", K8s::_shq($replicas)
-    push @argv, "--namespace", K8s::_shq($opts{namespace}) if defined $opts{namespace}
-    K8s::_run_json(\@argv)
+    my $r = K8s::_req(
+        { kind => $kind, name => $name, replicas => $replicas, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("scale", k8s__scale(to_json($r)))
 }
 
-# ---------------------------------------------------------------------------
-# Logs + exec
-# ---------------------------------------------------------------------------
+# ── logs ────────────────────────────────────────────────────────────
 
-# Buffered logs: returns the full log text as a string.
 fn K8s::logs ($pod, %opts) {
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "logs", K8s::_shq($pod)
-    push @argv, "--namespace",     K8s::_shq($opts{namespace})    if defined $opts{namespace}
-    push @argv, "--container",     K8s::_shq($opts{container})    if defined $opts{container}
-    push @argv, "--tail",          K8s::_shq($opts{tail})         if defined $opts{tail}
-    push @argv, "--since-seconds", K8s::_shq($opts{since_seconds}) if defined $opts{since_seconds}
-    push @argv, "--previous"                                       if $opts{previous}
-    push @argv, "--timestamps"                                     if $opts{timestamps}
-    K8s::_run_raw(\@argv)
+    die "K8s::logs: namespace => 'ns' required" unless defined $opts{namespace}
+    my $r = K8s::_req(
+        { pod => $pod, namespace => $opts{namespace},
+          container => $opts{container}, tail => $opts{tail} },
+        \%opts
+    )
+    K8s::_decode("logs", k8s__logs(to_json($r)))->{logs}
 }
 
-# Streaming logs: callback => sub ($line) { … }. Returns count.
 fn K8s::logs_follow ($pod, %opts) {
-    die "K8s::logs_follow: callback => sub { … } required" unless defined $opts{callback}
-    my $cb = $opts{callback}
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "logs", K8s::_shq($pod), "--follow"
-    push @argv, "--namespace",     K8s::_shq($opts{namespace})    if defined $opts{namespace}
-    push @argv, "--container",     K8s::_shq($opts{container})    if defined $opts{container}
-    push @argv, "--tail",          K8s::_shq($opts{tail})         if defined $opts{tail}
-    push @argv, "--since-seconds", K8s::_shq($opts{since_seconds}) if defined $opts{since_seconds}
-    push @argv, "--timestamps"                                     if $opts{timestamps}
-    my $cmd = join " ", @argv
-    my $n = 0
-    open my $fh, "-|", $cmd or die "K8s::logs_follow: spawn failed: $!"
-    while (my $line = <$fh>) {
-        chomp $line
-        next if $line eq ""
-        my $obj = from_json $line
-        $cb->($obj->{line})
-        $n++
-    }
-    close $fh or die "K8s::logs_follow: helper exited ($?)"
-    $n
+    die "K8s::logs_follow: streaming ops are deferred in v0.2.0 cdylib"
 }
 
-# Exec a command in a pod. $cmd is an arrayref of argv strings.
-# callback => sub ($stream, $data) { … } for each chunk; returns chunk count.
+fn K8s::watch ($kind, %opts) {
+    die "K8s::watch: streaming ops are deferred in v0.2.0 cdylib"
+}
+
 fn K8s::exec ($pod, $cmd, %opts) {
-    die "K8s::exec: cmd must be an arrayref"           unless ref($cmd) eq "ARRAY"
-    die "K8s::exec: callback => sub { … } required"    unless defined $opts{callback}
-    my $cb = $opts{callback}
-    my @argv = K8s::_conn_argv(\%opts)
-    push @argv, "exec", K8s::_shq($pod)
-    push @argv, "--namespace", K8s::_shq($opts{namespace}) if defined $opts{namespace}
-    push @argv, "--container", K8s::_shq($opts{container}) if defined $opts{container}
-    push @argv, "--cmd"
-    push @argv, K8s::_shq($_) for @$cmd
-    my $shcmd = join " ", @argv
-    my $n = 0
-    open my $fh, "-|", $shcmd or die "K8s::exec: spawn failed: $!"
-    while (my $line = <$fh>) {
-        chomp $line
-        next if $line eq ""
-        my $o = from_json $line
-        $cb->($o->{stream}, $o->{data})
-        $n++
-    }
-    close $fh or die "K8s::exec: helper exited ($?)"
-    $n
+    die "K8s::exec: streaming ops are deferred in v0.2.0 cdylib"
 }
 
 1
