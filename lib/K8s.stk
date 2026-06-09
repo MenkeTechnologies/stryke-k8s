@@ -163,4 +163,3 @@ fn K8s::exec ($pod, $cmd, %opts) {
     die "K8s::exec: streaming ops are deferred in v0.2.0 cdylib"
 }
 
-1
