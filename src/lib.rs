@@ -513,4 +513,23 @@ mod tests {
         let opts = json!({"kind": 42, "namespace": null});
         assert_eq!(extract_kind_and_ns(&opts), (None, None));
     }
+
+    /// Half-populated opts: kind present, namespace missing — common case
+    /// for cluster-scoped resources (Node, Namespace itself, PersistentVolume).
+    /// `dyn_api` interprets `None` namespace as "cluster scope", so this
+    /// shape must remain producible.
+    #[test]
+    fn opts_kind_only_namespace_missing() {
+        let opts = json!({"kind": "Node"});
+        assert_eq!(extract_kind_and_ns(&opts), (Some("Node"), None));
+    }
+
+    /// Empty-string kind is distinguishable from missing — pinned so
+    /// future refactors that coerce `Some("")` -> `None` get caught
+    /// (silent coercion would mask malformed input from the wrapper).
+    #[test]
+    fn opts_kind_empty_string_is_some() {
+        let opts = json!({"kind": ""});
+        assert_eq!(extract_kind_and_ns(&opts), (Some(""), None));
+    }
 }
