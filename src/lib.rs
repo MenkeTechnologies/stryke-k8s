@@ -546,7 +546,10 @@ mod tests {
     /// public `stryke_free_cstring` symbol — the exact sequence stryke's
     /// FFI bridge performs after each call. Returns the parsed JSON.
     unsafe fn take_ffi_result(p: *const c_char) -> Value {
-        assert!(!p.is_null(), "ffi_call_async returned null — CString allocation failed");
+        assert!(
+            !p.is_null(),
+            "ffi_call_async returned null — CString allocation failed"
+        );
         let s = CStr::from_ptr(p)
             .to_str()
             .expect("ffi result is not valid UTF-8")
@@ -616,6 +619,85 @@ mod tests {
             v["error"],
             json!("stryke-k8s handler panicked"),
             "panic guard must return the documented sentinel; got: {v}"
+        );
+    }
+
+    /// Non-null `args` containing bytes that are NOT valid JSON must NOT
+    /// crash the cdylib — `ffi_call_async` silently falls back to
+    /// `Value::Null` and routes the handler with that. A regression where
+    /// the inner `unwrap_or(Value::Null)` is replaced with `?`, `unwrap`,
+    /// or `expect` would either propagate a deserialization error in a
+    /// non-FFI-safe way OR panic across the C ABI boundary — both UB in
+    /// the dlopened-in-stryke setting. The pin: an args-ignoring handler
+    /// (`k8s__pkg_version` ignores its input) still succeeds when given
+    /// garbage bytes that happen to be C-string-shaped.
+    #[test]
+    fn ffi_call_async_malformed_json_args_falls_back_to_null() {
+        // Valid C string, invalid JSON: a trailing-comma object.
+        let bad = CString::new(r#"{"context": "kube-system",}"#).unwrap();
+        let p = k8s__pkg_version(bad.as_ptr());
+        let v = unsafe { take_ffi_result(p) };
+        assert_eq!(
+            v["version"],
+            json!(env!("CARGO_PKG_VERSION")),
+            "args-ignoring handler must still surface CARGO_PKG_VERSION; got: {v}"
+        );
+        assert!(
+            v.get("error").is_none(),
+            "malformed JSON args must not poison the success path; got: {v}"
+        );
+    }
+
+    /// Non-UTF-8 bytes inside a NUL-terminated `args` buffer must NOT
+    /// crash the cdylib. `CStr::to_bytes` is byte-oriented (no UTF-8
+    /// check), and `serde_json::from_slice` errors on invalid UTF-8 —
+    /// `ffi_call_async` must absorb that error via the same Null
+    /// fallback. A regression that "improves" parsing by calling
+    /// `CStr::to_str().unwrap()` panics across the C boundary on the
+    /// first non-UTF-8 byte. C callers of the cdylib (stryke's bridge,
+    /// plus any future direct loader) MUST be free to pass arbitrary
+    /// NUL-terminated bytes; this test pins that contract.
+    #[test]
+    fn ffi_call_async_non_utf8_args_falls_back_to_null() {
+        // 0xFF is invalid UTF-8 in any position. Build the buffer
+        // manually so CString::new isn't fooled (it only rejects
+        // interior NULs, not non-UTF-8).
+        let mut bytes = vec![0xFFu8, b'{', b'}'];
+        bytes.push(0); // C-string NUL terminator.
+        let p = k8s__pkg_version(bytes.as_ptr() as *const c_char);
+        let v = unsafe { take_ffi_result(p) };
+        assert_eq!(
+            v["version"],
+            json!(env!("CARGO_PKG_VERSION")),
+            "non-UTF-8 args bytes must not crash the export; got: {v}"
+        );
+    }
+
+    /// `ffi_call_async`'s error envelope on a handler `Err(_)` must be
+    /// exactly `{"error": "<anyhow::Display>"}` — the same shape stryke's
+    /// FFI bridge string-matches to surface failures back to user
+    /// scripts. The existing panic test pins the panic-sentinel shape;
+    /// this pins the normal-error shape, which is a DIFFERENT path
+    /// through `ffi_call_async`'s match arm (`Ok(Err(e))` vs `Err(_)`).
+    /// Catches regressions like nesting the error under `error.message`,
+    /// renaming the key, or accidentally producing `{"Err": "..."}`
+    /// (serde default for an `anyhow::Error` Serialize impl, which does
+    /// not exist — anyone tempted to swap to `serde_json::to_value(e)`
+    /// would get a broken envelope).
+    #[test]
+    fn ffi_call_async_handler_err_produces_error_envelope() {
+        let p = ffi_call_async(std::ptr::null(), |_| async {
+            Err::<Value, anyhow::Error>(anyhow!("missing kind"))
+        });
+        let v = unsafe { take_ffi_result(p) };
+        assert_eq!(
+            v["error"],
+            json!("missing kind"),
+            "handler Err must surface verbatim under top-level `error`; got: {v}"
+        );
+        assert!(
+            v.get("version").is_none() && v.get("Err").is_none(),
+            "error envelope must not carry success keys nor a serde-default `Err` wrapper; got: {v}"
         );
     }
 }
