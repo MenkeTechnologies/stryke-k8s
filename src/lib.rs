@@ -700,4 +700,122 @@ mod tests {
             "error envelope must not carry success keys nor a serde-default `Err` wrapper; got: {v}"
         );
     }
+
+    /// A non-null `args` pointer whose first byte is NUL (a valid but
+    /// empty C string) is a distinct code path from a null `args`
+    /// pointer. `CStr::from_ptr` returns an empty slice; `to_bytes()`
+    /// yields `&[]`; `serde_json::from_slice(&[])` is an *error*
+    /// ("EOF while parsing a value"), not Null. The `unwrap_or(Null)`
+    /// fallback must absorb that error. A regression where someone
+    /// replaces the fallback with `?` (propagating the deserialization
+    /// error as an `anyhow::Error`) would leak a synthetic JSON
+    /// `{"error": "EOF while parsing..."}` envelope on every
+    /// empty-string args call, breaking caller code that string-matches
+    /// on real handler errors. Pins the "empty args bytes ≡ no opts"
+    /// equivalence, distinct from the null-pointer path covered by
+    /// `pkg_version_ffi_roundtrip_with_null_args`.
+    #[test]
+    fn ffi_call_async_empty_cstring_args_falls_back_to_null() {
+        // Single NUL byte: from_ptr reads up to the NUL, getting 0 bytes
+        // of payload. This is "passed an empty C string", which is
+        // semantically different from "passed a null pointer".
+        let empty: [u8; 1] = [0];
+        let p = k8s__pkg_version(empty.as_ptr() as *const c_char);
+        let v = unsafe { take_ffi_result(p) };
+        assert_eq!(
+            v["version"],
+            json!(env!("CARGO_PKG_VERSION")),
+            "empty-bytes args path must not synthesize a parse-error envelope; got: {v}"
+        );
+        assert!(
+            v.get("error").is_none(),
+            "empty C string must NOT produce an `error` field — it must be \
+             handler-invisible just like a null args pointer; got: {v}"
+        );
+    }
+
+    /// Round-trip a handler-produced `Value` containing non-ASCII
+    /// Unicode (BMP + supplementary plane + zero-width joiner) through
+    /// `ffi_call_async`'s serialize → CString → CStr → deserialize
+    /// boundary. Pins three FFI-boundary invariants in one shot:
+    ///
+    ///   1. `serde_json::to_string` must produce a UTF-8 byte sequence
+    ///      that `CString::new` accepts — i.e. no interior NUL bytes
+    ///      even when the original JSON string contained `'\u{0}'`
+    ///      (which JSON serialization escapes as ` `).
+    ///   2. `CString::into_raw` → `CStr::from_ptr` → `to_str()` must
+    ///      survive arbitrary UTF-8 — pins against a regression where
+    ///      someone replaces `CString` with `&str` borrowing (would
+    ///      cause use-after-free) or with `OsString`/byte-array (would
+    ///      corrupt non-ASCII).
+    ///   3. The free symbol must accept the same pointer the export
+    ///      produced even when the payload contains multi-byte
+    ///      sequences — pins against a regression that double-encodes
+    ///      or truncates.
+    ///
+    /// Verified payload includes: BMP CJK (`한`), an emoji that is a
+    /// surrogate pair in UTF-16 (`😀`, U+1F600 in supplementary plane),
+    /// and a zero-width joiner emoji sequence (`👨‍💻`). All three break
+    /// naive byte-counted truncation.
+    #[test]
+    fn ffi_call_async_unicode_roundtrips_through_cstring_boundary() {
+        let payload = "한국어 + 😀 + 👨\u{200D}💻";
+        let p = ffi_call_async(std::ptr::null(), |_| {
+            let owned = payload.to_string();
+            async move { Ok(json!({ "text": owned, "embedded_nul_test": "a\u{0}b" })) }
+        });
+        let v = unsafe { take_ffi_result(p) };
+        assert_eq!(
+            v["text"],
+            json!(payload),
+            "non-ASCII UTF-8 must survive verbatim through the CString round-trip; got: {v}"
+        );
+        // The original JSON string had a raw NUL — serde_json escapes
+        // it as ` `, so it parses back to a string containing a
+        // real NUL byte. CString::new MUST have succeeded (no null
+        // pointer return) because the serialized JSON contains no raw
+        // 0x00 byte. If CString::new ever DID fail here, the export
+        // would have returned null and `take_ffi_result`'s assertion
+        // would have already panicked.
+        assert_eq!(
+            v["embedded_nul_test"],
+            json!("a\u{0}b"),
+            "JSON-escaped \\u0000 must round-trip as a real NUL inside the parsed string; got: {v}"
+        );
+    }
+
+    /// The runtime + client-cache singletons (`RUNTIME`, `CLIENTS`) use
+    /// `OnceCell::get_or_init`. Calling an export multiple times in
+    /// sequence must reuse the SAME `tokio::Runtime` instance — a
+    /// regression where `rt()` is rewritten to build a fresh runtime
+    /// per call (e.g. someone tries to "fix" a perceived shutdown
+    /// issue) would (a) burn N worker threads per N calls until the
+    /// process OOMs, and (b) defeat the connection pooling that v0.2.0
+    /// shipped specifically to fix v1's "rebuild client per fork"
+    /// regression (see module doc-comment at top of lib.rs). This test
+    /// pins the singleton by invoking the args-ignoring `k8s__pkg_version`
+    /// export 10 times sequentially. If the runtime were rebuilt each
+    /// call, `RUNTIME.set` (called internally by `get_or_init` only on
+    /// first-init) would still only fire once — but the COUNT of
+    /// background threads in the process would grow. A weaker but
+    /// crate-internal-testable invariant: 10 calls all return the
+    /// documented success shape without panic and without producing an
+    /// `error` field — i.e. the second-through-tenth call still find a
+    /// usable runtime to `block_on` against.
+    #[test]
+    fn ffi_call_async_singleton_runtime_handles_repeated_calls() {
+        for i in 0..10 {
+            let p = k8s__pkg_version(std::ptr::null());
+            let v = unsafe { take_ffi_result(p) };
+            assert_eq!(
+                v["version"],
+                json!(env!("CARGO_PKG_VERSION")),
+                "iteration {i}: pkg_version must succeed identically across calls; got: {v}"
+            );
+            assert!(
+                v.get("error").is_none(),
+                "iteration {i}: repeated calls must not surface runtime-init errors; got: {v}"
+            );
+        }
+    }
 }
