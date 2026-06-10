@@ -12,10 +12,10 @@ p K8s::logs($pod, namespace => $ns, tail => 20)
 
 p ""
 p "── streaming new lines (Ctrl-C to stop, 100-line cap)"
-var $seen = 0
-K8s::logs_follow $pod,
+mysync $seen = 0
+K8s::logs_follow($pod,
     namespace => $ns,
     callback  => sub ($line) {
         p $line
         exit 0 if ++$seen >= 100
-    }
+    })

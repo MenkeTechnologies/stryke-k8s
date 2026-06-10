@@ -55,5 +55,5 @@ K8s::apply {
 p "applied service echo"
 
 p "scaling echo → 3"
-val $r = K8s::scale "deploy", "echo", 3, namespace => $ns
+val $r = K8s::scale("deploy", "echo", 3, namespace => $ns)
 p "  spec.replicas = $r->{spec}{replicas}"
