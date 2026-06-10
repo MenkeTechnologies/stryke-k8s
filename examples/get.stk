@@ -4,12 +4,25 @@
 
 use K8s
 
-p "context: " . K8s::current_context()
-p "version: " . K8s::version()->{gitVersion}
+val $ctx = eval { K8s::current_context() }
+unless (defined $ctx) {
+    p "kubeconfig not usable — set KUBECONFIG or run from a configured shell to exercise the demo"
+    exit 0
+}
+p "context: $ctx"
+val $ver = eval { K8s::version() }
+p "version: " . (defined $ver ? ($ver->{gitVersion} // "?") : "(unknown)")
+
+val @namespaces = eval { K8s::namespaces() }
+if ($@) {
+    p ""
+    p "(your context lacks RBAC to list cluster-scoped resources — exiting cleanly)"
+    exit 0
+}
 
 p ""
 p "── namespaces"
-for val $ns (K8s::namespaces()) {
+for val $ns (@namespaces) {
     p sprintf("  %-30s %s", $ns->{name}, $ns->{status})
 }
 

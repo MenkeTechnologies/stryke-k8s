@@ -5,9 +5,20 @@
 
 use K8s
 
+val $ctx = eval { K8s::current_context() }
+unless (defined $ctx) {
+    p "kubeconfig not usable — set KUBECONFIG or run from a configured shell to exercise the demo"
+    exit 0
+}
+
 val $ns = "stryke-demo"
 
-K8s::apply { apiVersion => "v1", kind => "Namespace", metadata => { name => $ns } }
+eval { K8s::apply { apiVersion => "v1", kind => "Namespace", metadata => { name => $ns } } }
+if ($@) {
+    p "K8s::apply failed (likely RBAC): $@"
+    p "(this demo requires permissions to patch Namespace + ConfigMap + Deployment + Service)"
+    exit 0
+}
 p "applied namespace $ns"
 
 K8s::apply {
