@@ -1,0 +1,60 @@
+#!/usr/bin/env stryke
+# examples/cluster_info.stk — cluster server version + namespace summary
+#                              + node count + pod counts per namespace.
+#
+# Read-only: api version, namespaces, nodes list, pod counts.
+# Eval-guarded — missing kubeconfig exits cleanly.
+#
+# Run:   s examples/cluster_info.stk
+#        KUBECONFIG=~/.kube/config s examples/cluster_info.stk
+
+use K8s
+
+p "=== K8s cluster_info ==="
+
+val $cur = eval { K8s::current_context() }
+if ($@ || !defined $cur) {
+    p "kubeconfig not usable — set KUBECONFIG or run from a configured shell to exercise the demo"
+    exit 0
+}
+
+p "context:    $cur"
+
+val $ver = eval { K8s::version() }
+if (!$@ && defined $ver) {
+    p "server:     " . ($ver->{server} // "?")
+}
+
+val @ns = eval { K8s::namespaces() }
+if ($@) {
+    p "namespaces: (forbidden — RBAC blocks listing)"
+    p ""
+    p "(your kubeconfig context is reachable but lacks read perms for cluster-scoped resources;"
+    p " try a context with broader permissions or scope to a single namespace)"
+    exit 0
+}
+p "namespaces: " . scalar(@ns)
+
+val @nodes = eval { K8s::get("nodes") }
+unless ($@) {
+    p "nodes:      " . scalar(@nodes)
+}
+
+# Pod count per namespace (cap at top 10 by pod count for terse output).
+var @counts
+for val $n (@ns) {
+    val @pods = eval { K8s::get("pods", namespace => $n) }
+    next if $@
+    push @counts, { ns => $n, pods => scalar(@pods) }
+}
+
+# Sort by pod count desc, print top 10.
+@counts = sort { $b->{pods} <=> $a->{pods} } @counts
+val $shown = scalar(@counts) < 10 ? scalar(@counts) : 10
+if ($shown > 0) {
+    p ""
+    p "── top $shown namespaces by pod count ──"
+    for (var $i = 0; $i < $shown; $i++) {
+        printf "  %4d  %s\n", $counts[$i]{pods}, $counts[$i]{ns}
+    }
+}
