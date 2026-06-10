@@ -1,0 +1,37 @@
+#!/usr/bin/env stryke
+# examples/discover.stk — minimum-viable tour of the `K8s` package.
+#
+# Runs end-to-end in CI: missing kubeconfig is non-fatal because every
+# discovery call is eval-guarded. Read-only ops (contexts, current_context,
+# namespaces, api_resources) have zero side effects against a live cluster.
+#
+# Run:   s examples/discover.stk
+#        KUBECONFIG=~/.kube/config s examples/discover.stk
+
+use K8s
+
+p "=== K8s discover ==="
+p "version:    " . K8s::version()->{server} // "(no server reachable)"
+p "KUBECONFIG: " . ($ENV{KUBECONFIG} // "(~/.kube/config)")
+p ""
+
+val $ctxs = eval { [K8s::contexts()] }
+
+if (defined $ctxs && !$@) {
+    p "kubeconfig: usable"
+    p "  contexts:        " . scalar(@$ctxs)
+    val $cur = eval { K8s::current_context() }
+    p "  current context: " . ($cur // "(none)")
+    val @ns = eval { K8s::namespaces() }
+    p "  namespaces:      " . scalar(@ns)
+    val @res = eval { K8s::api_resources() }
+    p "  api resources:   " . scalar(@res)
+} else {
+    p "kubeconfig: not usable — skipping live ops"
+    p ""
+    p "expected call shape when live:"
+    p "  val @ctxs  = K8s::contexts()"
+    p "  val \$cur   = K8s::current_context()"
+    p "  val @ns    = K8s::namespaces()"
+    p "  val @pods  = K8s::list(\"pods\", namespace => \"default\")"
+}
