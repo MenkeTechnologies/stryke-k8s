@@ -532,4 +532,90 @@ mod tests {
         let opts = json!({"kind": ""});
         assert_eq!(extract_kind_and_ns(&opts), (Some(""), None));
     }
+
+    // ── FFI plumbing invariants ──────────────────────────────────────────────
+    //
+    // These tests exercise the cdylib export surface that stryke's dlopen
+    // bridge actually calls. They are the only purely-local invariants
+    // testable without a live apiserver: pointer lifetime, panic guard, and
+    // null-pointer no-op on free. All three are FFI-safety load-bearing —
+    // a regression in any of them is UB across the FFI boundary.
+
+    /// Convert a `*const c_char` returned from an export into an owned JSON
+    /// `Value` by copying out of the pointer and then freeing it via the
+    /// public `stryke_free_cstring` symbol — the exact sequence stryke's
+    /// FFI bridge performs after each call. Returns the parsed JSON.
+    unsafe fn take_ffi_result(p: *const c_char) -> Value {
+        assert!(!p.is_null(), "ffi_call_async returned null — CString allocation failed");
+        let s = CStr::from_ptr(p)
+            .to_str()
+            .expect("ffi result is not valid UTF-8")
+            .to_owned();
+        // Free via the public symbol — round-trips `into_raw` → `from_raw`.
+        stryke_free_cstring(p as *mut c_char);
+        serde_json::from_str(&s).expect("ffi result is not valid JSON")
+    }
+
+    /// `k8s__pkg_version(null)` must:
+    ///   1. accept a null `args` pointer (stryke passes null when stryke
+    ///      caller passes no opts dict),
+    ///   2. return a non-null pointer to a NUL-terminated UTF-8 JSON
+    ///      string,
+    ///   3. carry the compile-time `CARGO_PKG_VERSION` verbatim — not a
+    ///      stale literal,
+    ///   4. survive a round-trip through `stryke_free_cstring` without
+    ///      UB (the free symbol must accept the same pointer the export
+    ///      handed out — catches any regression where `into_raw` is
+    ///      replaced with a borrowing pattern).
+    #[test]
+    fn pkg_version_ffi_roundtrip_with_null_args() {
+        let p = k8s__pkg_version(std::ptr::null());
+        let v = unsafe { take_ffi_result(p) };
+        assert_eq!(
+            v["version"],
+            json!(env!("CARGO_PKG_VERSION")),
+            "pkg_version JSON must carry compile-time CARGO_PKG_VERSION"
+        );
+        // No "error" key on the success path.
+        assert!(
+            v.get("error").is_none(),
+            "success path must not carry an `error` field, got: {v}"
+        );
+    }
+
+    /// `stryke_free_cstring(null)` MUST be a no-op (documented in the
+    /// `# Safety` block on the export). If the null guard is ever
+    /// removed, `CString::from_raw(null)` is undefined behavior and any
+    /// caller that defensively passes null (stryke's wrapper does on
+    /// error-allocation paths where the export returned null) would
+    /// crash the host process. This test pins the guard.
+    #[test]
+    fn free_cstring_null_is_noop() {
+        unsafe { stryke_free_cstring(std::ptr::null_mut()) };
+        // If we got here, the null guard held. A second call must also
+        // be safe — defensive callers may double-free a null.
+        unsafe { stryke_free_cstring(std::ptr::null_mut()) };
+    }
+
+    /// `ffi_call_async` must trap panics from the handler future and
+    /// return the documented sentinel error JSON. Without `catch_unwind`
+    /// a panic unwinding across the C ABI boundary is UB (the cdylib is
+    /// dlopened in stryke's process — a panic would tear down the whole
+    /// shell). Stryke's caller may also string-match on the sentinel
+    /// `"stryke-k8s handler panicked"` to surface the failure; changing
+    /// the message silently breaks that. Both invariants are pinned here.
+    #[test]
+    fn ffi_call_async_traps_handler_panic() {
+        let p = ffi_call_async(std::ptr::null(), |_| async {
+            panic!("simulated handler panic");
+            #[allow(unreachable_code)]
+            Ok::<Value, anyhow::Error>(json!({}))
+        });
+        let v = unsafe { take_ffi_result(p) };
+        assert_eq!(
+            v["error"],
+            json!("stryke-k8s handler panicked"),
+            "panic guard must return the documented sentinel; got: {v}"
+        );
+    }
 }
