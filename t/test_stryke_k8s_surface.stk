@@ -1,0 +1,39 @@
+## t/test_stryke_k8s_surface.stk — wrapper-completeness pin.
+##
+## Asserts every public `fn X::Y::name` declared in lib/*.stk is
+## reachable via `use` at runtime. Uses `exists &X::Y::name` to
+## probe the symbol table without invoking the sub.
+##
+## Catches:
+##   * a wrapper sub deleted from lib/ but still referenced elsewhere
+##   * a sub-package file dropped from the install layout
+##   * `use Foo::Bar` failing to chase into lib/Bar.stk
+##   * an installed-package entry whose namespace bridge is broken
+##
+## Permission-free — no service, no creds, no live daemon. Private
+## helpers (`_` prefix) are implementation detail and are NOT
+## asserted, so refactoring internals stays free.
+
+use K8s
+
+# ── K8s.stk ──────────────────────────────────────────────
+assert_ok exists &K8s::pkg_version, "K8s::pkg_version exists"
+assert_ok exists &K8s::version, "K8s::version exists"
+assert_ok exists &K8s::ping, "K8s::ping exists"
+assert_ok exists &K8s::contexts, "K8s::contexts exists"
+assert_ok exists &K8s::current_context, "K8s::current_context exists"
+assert_ok exists &K8s::namespaces, "K8s::namespaces exists"
+assert_ok exists &K8s::api_resources, "K8s::api_resources exists"
+assert_ok exists &K8s::get, "K8s::get exists"
+assert_ok exists &K8s::get_one, "K8s::get_one exists"
+assert_ok exists &K8s::create, "K8s::create exists"
+assert_ok exists &K8s::replace, "K8s::replace exists"
+assert_ok exists &K8s::apply, "K8s::apply exists"
+assert_ok exists &K8s::delete_resource, "K8s::delete_resource exists"
+assert_ok exists &K8s::scale, "K8s::scale exists"
+assert_ok exists &K8s::logs, "K8s::logs exists"
+assert_ok exists &K8s::logs_follow, "K8s::logs_follow exists"
+assert_ok exists &K8s::watch, "K8s::watch exists"
+assert_ok exists &K8s::exec, "K8s::exec exists"
+
+test_run
