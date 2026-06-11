@@ -533,6 +533,155 @@ mod tests {
         assert_eq!(extract_kind_and_ns(&opts), (Some(""), None));
     }
 
+    /// Mirror of the context-resolution expression at the top of
+    /// `get_client` (lines ~51-55): `opts.get("context")
+    /// .and_then(as_str).map(String::from).unwrap_or_else(|| "_default")`.
+    /// The resolved string is then compared against the literal
+    /// `"_default"` in `get_client` to choose between
+    /// `Client::try_default()` (in-cluster / current-context fast path)
+    /// and the explicit-kubeconfig-context branch. Getting this wrong
+    /// silently routes a caller to the wrong cluster.
+    fn resolve_context(opts: &Value) -> String {
+        opts.get("context")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| "_default".to_string())
+    }
+
+    /// Missing `context` key resolves to the sentinel `_default`, which
+    /// `get_client` routes to `Client::try_default()`. This is the
+    /// overwhelmingly common call shape (stryke scripts that never name a
+    /// context). Pinned so a refactor that, e.g., defaults to `""` or to
+    /// `kc.current_context` instead would be caught — those would change
+    /// which client-construction branch fires.
+    #[test]
+    fn resolve_context_missing_is_default_sentinel() {
+        assert_eq!(resolve_context(&json!({})), "_default");
+        assert_eq!(
+            resolve_context(&json!({"namespace": "kube-system"})),
+            "_default"
+        );
+    }
+
+    /// A non-string `context` (number/bool/null/object) must fall back to
+    /// `_default`, NOT stringify. `as_str` returns None for `42`, so the
+    /// `unwrap_or_else` fires. This is the same as_str-vs-coerce invariant
+    /// the kind tests pin, but on a DIFFERENT field whose miss has a
+    /// harsher consequence: a stringified `"42"` context name would make
+    /// `get_client` take the kubeconfig branch and fail
+    /// `Kubeconfig::read()` / context-lookup at runtime instead of using
+    /// the default client.
+    #[test]
+    fn resolve_context_non_string_falls_back_to_default() {
+        assert_eq!(resolve_context(&json!({"context": 42})), "_default");
+        assert_eq!(resolve_context(&json!({"context": true})), "_default");
+        assert_eq!(resolve_context(&json!({"context": null})), "_default");
+        assert_eq!(
+            resolve_context(&json!({"context": {"name": "x"}})),
+            "_default"
+        );
+    }
+
+    /// Critical divergence: an EMPTY-STRING context (`""`) is NOT the
+    /// `_default` sentinel. `as_str` yields `Some("")`, `map` keeps it,
+    /// `unwrap_or_else` does not fire — so `get_client`'s
+    /// `if context == "_default"` is FALSE and it takes the explicit
+    /// kubeconfig branch with `context: Some("")`. The empty string is
+    /// distinguishable from "absent" and must stay that way: a future
+    /// refactor that coerces `Some("")` -> default would silently swallow
+    /// a malformed caller request (empty context name) and hit the wrong
+    /// cluster instead of erroring. Pins empty != missing.
+    #[test]
+    fn resolve_context_empty_string_is_not_default_sentinel() {
+        let r = resolve_context(&json!({"context": ""}));
+        assert_eq!(r, "");
+        assert_ne!(
+            r, "_default",
+            "empty context must not collapse to the default sentinel"
+        );
+    }
+
+    /// A real context name is passed through verbatim, including one that
+    /// contains the substring `_default` but is not equal to it
+    /// (`prod_default`). `get_client`'s branch uses `==`, not
+    /// `contains`/`starts_with`, so only the exact sentinel takes the
+    /// default path. Pins against a regression that loosens the literal
+    /// comparison.
+    #[test]
+    fn resolve_context_named_context_passthrough() {
+        assert_eq!(
+            resolve_context(&json!({"context": "prod-us-east"})),
+            "prod-us-east"
+        );
+        assert_eq!(
+            resolve_context(&json!({"context": "prod_default"})),
+            "prod_default"
+        );
+    }
+
+    /// Mirror of `op_scale`'s replicas extraction (line ~294):
+    /// `opts["replicas"].as_i64().ok_or(...)`. The extracted i64 is
+    /// injected verbatim into the scale patch `{"spec":{"replicas": n}}`.
+    fn extract_replicas(opts: &Value) -> Option<i64> {
+        opts["replicas"].as_i64()
+    }
+
+    /// `as_i64` on a JSON-parsed integer round-trips; a float (even
+    /// integral-valued `3.0`) and a numeric STRING both yield None.
+    /// op_scale relies on this: a caller sending `"replicas": "3"` or
+    /// `"replicas": 3.0` (e.g. from a language that has no int/float
+    /// distinction) gets a clean `missing replicas` error rather than a
+    /// silently-coerced value. Pins the strict-integer contract so a
+    /// refactor to `as_f64().map(|f| f as i64)` (which WOULD accept 3.0
+    /// and truncate 3.9) is caught.
+    #[test]
+    fn extract_replicas_rejects_float_and_string() {
+        // Parse from text so the integer is a genuine JSON integer.
+        let int_opts: Value = serde_json::from_str(r#"{"replicas": 3}"#).unwrap();
+        assert_eq!(extract_replicas(&int_opts), Some(3));
+
+        let float_opts: Value = serde_json::from_str(r#"{"replicas": 3.0}"#).unwrap();
+        assert_eq!(
+            extract_replicas(&float_opts),
+            None,
+            "integral-valued float must NOT coerce to i64 — strict integer only"
+        );
+
+        let str_opts: Value = serde_json::from_str(r#"{"replicas": "3"}"#).unwrap();
+        assert_eq!(
+            extract_replicas(&str_opts),
+            None,
+            "numeric string is not an i64"
+        );
+
+        assert_eq!(
+            extract_replicas(&json!({})),
+            None,
+            "missing replicas is None"
+        );
+    }
+
+    /// Negative and zero replicas DO extract as valid i64 (`Some(-1)`,
+    /// `Some(0)`). op_scale does no range validation — it forwards
+    /// whatever i64 it gets straight into the patch and lets the
+    /// apiserver reject out-of-range values. This test PINS that the
+    /// wrapper itself does not pre-filter sign: `scale(deploy, -1)` must
+    /// reach the server as `-1`, not be clamped or rejected client-side.
+    /// If someone adds a `n >= 0` guard here, the error surface changes
+    /// from "apiserver rejects" to "wrapper rejects" and this catches it.
+    #[test]
+    fn extract_replicas_passes_zero_and_negative_through() {
+        let zero: Value = serde_json::from_str(r#"{"replicas": 0}"#).unwrap();
+        assert_eq!(extract_replicas(&zero), Some(0));
+
+        let neg: Value = serde_json::from_str(r#"{"replicas": -1}"#).unwrap();
+        assert_eq!(
+            extract_replicas(&neg),
+            Some(-1),
+            "wrapper must forward negative replicas verbatim; server, not client, validates range"
+        );
+    }
+
     // ── FFI plumbing invariants ──────────────────────────────────────────────
     //
     // These tests exercise the cdylib export surface that stryke's dlopen
