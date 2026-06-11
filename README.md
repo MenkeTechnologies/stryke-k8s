@@ -31,7 +31,7 @@ minikube, EKS, GKE, AKS, OpenShift, vanilla). Opt-in package tier.
 - [\[0x02\] CLI: `k8s`](#0x02-cli-k8s)
 - [\[0x03\] GVK shortcuts](#0x03-gvk-shortcuts)
 - [\[0x04\] API reference](#0x04-api-reference)
-- [\[0x05\] Helper protocol](#0x05-helper-protocol)
+- [\[0x05\] FFI layer](#0x05-ffi-layer)
 - [\[0x06\] Tests](#0x06-tests)
 - [\[0x07\] Dev workflow](#0x07-dev-workflow)
 - [\[0x08\] Layout](#0x08-layout)
@@ -78,15 +78,7 @@ p K8s::version()->{gitVersion}
 
 # List — `kind` accepts short forms or strict GVK.
 my @pods   = K8s::get "pods",  namespace => "default"
-my @svcs   = K8s::get "svc",   all_namespaces => 1
 my @deploy = K8s::get "apps/v1/Deployment", namespace => "kube-system"
-
-# Selectors, limit.
-my @web = K8s::get "pods",
-    namespace      => "prod",
-    label_selector => "app=web,tier!=batch",
-    field_selector => "status.phase=Running",
-    limit          => 50
 
 # Get one.
 my $pod = K8s::get_one "pod", "echo-7d9f", namespace => "default"
@@ -141,10 +133,14 @@ K8s::exec "echo-7d9f", ["sh", "-c", "uptime"],
 K8s::delete_resource "namespace", "ci"
 ```
 
+> `K8s::logs_follow`, `K8s::watch`, and `K8s::exec` are deferred in the
+> v0.2.x cdylib — they die until the callback FFI ships (see
+> [\[0x05\] FFI layer](#0x05-ffi-layer)).
+
 Per-call connection overrides on every public fn:
 
 ```stryke
-my %prod = (context => "prod-eks", kubeconfig => "/etc/k8s/prod.yaml")
+my %prod = (context => "prod-eks")
 K8s::get "pods", namespace => "payments", %prod
 ```
 
@@ -210,10 +206,10 @@ example.com/v1/Widget
 ### Read paths
 
 ```stryke
-K8s::get           $kind, %opts → @objects     # namespace, all_namespaces,
-                                               # label_selector, field_selector, limit
+K8s::get           $kind, %opts → @objects     # opts: namespace (cluster-wide
+                                               # when omitted on cluster kinds)
 K8s::get_one       $kind, $name, %opts → \%doc | undef
-K8s::watch         $kind, %opts → $count       # callback => sub ($evt) { … }
+K8s::watch         $kind, %opts → $count       # deferred in v0.2.x — dies
 K8s::namespaces    %opts → @{ {name, status, labels} }
 K8s::api_resources %opts → @{ {group, version, kind, plural, namespaced, verbs} }
 ```
@@ -221,22 +217,21 @@ K8s::api_resources %opts → @{ {group, version, kind, plural, namespaced, verbs
 ### Write paths
 
 ```stryke
-K8s::apply             \%doc, %opts → \%applied   # opts: field_manager, force, namespace
+K8s::apply             \%doc, %opts → \%applied   # server-side apply; namespace
+                                                  # comes from doc.metadata
 K8s::create            \%doc, %opts → \%created
 K8s::replace           \%doc, %opts → \%replaced
-K8s::delete_resource   $kind, $name, %opts → \%result   # opts: namespace, grace_period, force
+K8s::delete_resource   $kind, $name, %opts → \%result   # opts: namespace
 K8s::scale             $kind, $name, $replicas, %opts → \%scale
 ```
 
 ### Logs + exec
 
 ```stryke
-K8s::logs          $pod, %opts → $text       # opts: namespace, container, tail,
-                                             # since_seconds, previous, timestamps
-K8s::logs_follow   $pod, %opts → $count      # callback => sub ($line) { … }
+K8s::logs          $pod, %opts → $text       # opts: namespace, container, tail
+K8s::logs_follow   $pod, %opts → $count      # deferred in v0.2.x — dies
 K8s::exec          $pod, \@cmd, %opts → $count
-                                             # callback => sub ($stream, $data) { … }
-                                             # $stream is "stdout" or "stderr"
+                                             # deferred in v0.2.x — dies
 ```
 
 ### Connection + plumbing
@@ -321,18 +316,18 @@ stryke-k8s/
   stryke.toml                      # stryke package manifest
   Cargo.toml                       # Rust helper crate manifest
   Makefile
-  src/main.rs                      # single-file helper
+  src/lib.rs                       # single-file cdylib
   lib/
     K8s.stk                        # `use K8s`
-  bin/
-    k8s.stk                        # `k8s` CLI
-    k8s-build.stk
   t/
     test_k8s.stk                   # live round-trip
+    test_stryke_k8s_surface.stk
   examples/
     get.stk
     apply.stk
     logs.stk
+    cluster_info.stk
+    discover.stk
   .github/workflows/
     ci.yml                         # kind cluster + live round-trip
     release.yml                    # cross-compile + GH release on tag push
@@ -340,7 +335,7 @@ stryke-k8s/
 
 ## [0x09] Roadmap
 
-| v1 (this release) | v2+ |
+| v1 (helper era) | v2+ |
 |---|---|
 | Generic dynamic resources via discovery | Typed wrappers for top-N kinds (zero-alloc Pod/Deployment/Service) |
 | Server-side apply | `kubectl diff` equivalent (dry-run + server-side three-way) |
