@@ -266,7 +266,7 @@ points covering version/discovery, get/list, write paths (create / replace
   helper rebuilt the client (TLS+auth handshake) per fork; this reuses
   the same client + underlying HTTP pool across calls.
 
-**Deferred from v0.2.0:** streaming-only ops (`watch`, `logs --follow`,
+**Deferred from v0.2.1:** streaming-only ops (`watch`, `logs --follow`,
 `exec`). These need a callback FFI shape that v1's `FfiSig::StrToStr`
 doesn't model. Calling them dies with a clear message.
 
