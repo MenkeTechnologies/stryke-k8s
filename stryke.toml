@@ -23,6 +23,7 @@ exports = [
     "k8s__create",
     "k8s__replace",
     "k8s__apply",
+    "k8s__patch",
     "k8s__delete",
     "k8s__scale",
     "k8s__logs",

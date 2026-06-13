@@ -174,7 +174,19 @@ async fn op_get(opts: Value) -> Result<Value> {
     let namespace = opts["namespace"].as_str();
     let (ar, caps) = discover_kind(&c, kind).await?;
     let api = dyn_api(&c, &ar, &caps, namespace);
-    let list = api.list(&ListParams::default()).await?;
+    // Honour label/field selectors and a limit — without these `get pods`
+    // always returned the whole namespace, ignoring `app=web` style filters.
+    let mut lp = ListParams::default();
+    if let Some(l) = opts["label_selector"].as_str() {
+        lp = lp.labels(l);
+    }
+    if let Some(f) = opts["field_selector"].as_str() {
+        lp = lp.fields(f);
+    }
+    if let Some(n) = opts["limit"].as_u64() {
+        lp = lp.limit(n as u32);
+    }
+    let list = api.list(&lp).await?;
     Ok(json!({"items": to_value(list.items)}))
 }
 
@@ -262,6 +274,44 @@ async fn op_apply(opts: Value) -> Result<Value> {
         .patch(&name, &pp, &kube::api::Patch::Apply(&doc))
         .await?;
     Ok(to_value(applied))
+}
+
+async fn op_patch(opts: Value) -> Result<Value> {
+    // Validate every required arg before opening a cluster connection so a
+    // typo (or bad patch type) surfaces immediately.
+    let kind = opts["kind"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing kind"))?
+        .to_string();
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?
+        .to_string();
+    let body = opts
+        .get("patch")
+        .cloned()
+        .filter(|p| !p.is_null())
+        .ok_or_else(|| anyhow!("missing patch (the patch document)"))?;
+    let ptype = opts["type"].as_str().unwrap_or("merge").to_string();
+    if ptype != "merge" && ptype != "strategic" {
+        return Err(anyhow!(
+            "unknown patch type `{ptype}` (want merge|strategic)"
+        ));
+    }
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    let (ar, caps) = discover_kind(&c, &kind).await?;
+    let api = dyn_api(&c, &ar, &caps, namespace);
+    let pp = PatchParams::default();
+    // `type`: merge (RFC 7386 JSON merge) or strategic (k8s strategic merge).
+    let patched = if ptype == "merge" {
+        api.patch(&name, &pp, &kube::api::Patch::Merge(&body))
+            .await?
+    } else {
+        api.patch(&name, &pp, &kube::api::Patch::Strategic(&body))
+            .await?
+    };
+    Ok(to_value(patched))
 }
 
 async fn op_delete(opts: Value) -> Result<Value> {
@@ -428,6 +478,11 @@ pub extern "C" fn k8s__replace(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__apply(args: *const c_char) -> *const c_char {
     ffi_call_async(args, op_apply)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__patch(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_patch)
 }
 
 #[no_mangle]
@@ -964,6 +1019,31 @@ mod tests {
             assert!(
                 v.get("error").is_none(),
                 "iteration {i}: repeated calls must not surface runtime-init errors; got: {v}"
+            );
+        }
+    }
+
+    /// `k8s__patch` must validate kind/name/patch and the patch type BEFORE
+    /// touching kubeconfig — so a typo (or unsupported patch type) surfaces
+    /// without a live apiserver. Pins the validate-before-connect ordering.
+    #[test]
+    fn patch_validates_args_before_connecting() {
+        let cases = [
+            (r#"{}"#, "missing kind"),
+            (r#"{"kind":"deploy"}"#, "missing name"),
+            (r#"{"kind":"deploy","name":"web"}"#, "missing patch"),
+            (
+                r#"{"kind":"deploy","name":"web","patch":{"x":1},"type":"json"}"#,
+                "unknown patch type",
+            ),
+        ];
+        for (arg, want) in cases {
+            let cs = CString::new(arg).unwrap();
+            let v = unsafe { take_ffi_result(k8s__patch(cs.as_ptr())) };
+            let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
+            assert!(
+                err.contains(want),
+                "expected `{want}` for {arg}; got: {err}"
             );
         }
     }

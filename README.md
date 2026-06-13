@@ -206,13 +206,18 @@ example.com/v1/Widget
 ### Read paths
 
 ```stryke
-K8s::get           $kind, %opts → @objects     # opts: namespace (cluster-wide
-                                               # when omitted on cluster kinds)
+K8s::get           $kind, %opts → @objects     # opts: namespace, label_selector,
+                                               # field_selector, limit
 K8s::get_one       $kind, $name, %opts → \%doc | undef
 K8s::watch         $kind, %opts → $count       # deferred in v0.2.x — dies
 K8s::namespaces    %opts → @{ {name, status, labels} }
 K8s::api_resources %opts → @{ {group, version, kind, plural, namespaced, verbs} }
 ```
+
+`get` now honours `label_selector => "app=web"` and
+`field_selector => "status.phase=Running"` (and `limit`); without them it
+lists the whole namespace. Events for a resource are reachable as
+`K8s::get "events", field_selector => "involvedObject.name=$name"`.
 
 ### Write paths
 
@@ -221,9 +226,15 @@ K8s::apply             \%doc, %opts → \%applied   # server-side apply; namespa
                                                   # comes from doc.metadata
 K8s::create            \%doc, %opts → \%created
 K8s::replace           \%doc, %opts → \%replaced
+K8s::patch             $kind, $name, \%patch, %opts → \%patched   # opts: type (merge|strategic), namespace
 K8s::delete_resource   $kind, $name, %opts → \%result   # opts: namespace
 K8s::scale             $kind, $name, $replicas, %opts → \%scale
 ```
+
+`patch` does a JSON merge patch by default (`type => "strategic"` for a
+strategic merge) — e.g. `kubectl rollout restart` is
+`K8s::patch "deploy", $name, { spec => { template => { metadata => { annotations =>
+{ "stryke.k8s/restartedAt" => $now } } } } }, type => "strategic"`.
 
 ### Logs + exec
 

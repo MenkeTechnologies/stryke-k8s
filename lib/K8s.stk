@@ -81,9 +81,14 @@ fn K8s::api_resources (%opts) {
 
 # ── get / list ──────────────────────────────────────────────────────
 
-## List resources of $kind in `namespace` (or default).
+## List resources of $kind in `namespace` (or default). opts: label_selector
+## ("app=web"), field_selector ("status.phase=Running"), limit.
 fn K8s::get ($kind, %opts) {
-    val $r = K8s::_req({ kind => $kind, namespace => $opts{namespace} }, \%opts)
+    val $r = K8s::_req(
+        { kind => $kind, namespace => $opts{namespace},
+          label_selector => $opts{label_selector},
+          field_selector => $opts{field_selector}, limit => $opts{limit} },
+        \%opts)
     val $o = K8s::_decode("get", k8s__get(to_json($r)))
     @{ $o->{items} }
 }
@@ -124,6 +129,17 @@ fn K8s::delete_resource ($kind, $name, %opts) {
         \%opts
     )
     K8s::_decode("delete", k8s__delete(to_json($r)))
+}
+
+## Patch $kind $name with $patch (a hashref). opts: type (merge|strategic,
+## default merge), namespace. Returns the patched object.
+fn K8s::patch ($kind, $name, $patch, %opts) {
+    val $r = K8s::_req(
+        { kind => $kind, name => $name, patch => $patch,
+          type => ($opts{type} // "merge"), namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("patch", k8s__patch(to_json($r)))
 }
 
 ## Patch `spec.replicas` to $replicas on $kind $name.
