@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![stryke](https://img.shields.io/badge/stryke-package-cyan.svg)](https://github.com/MenkeTechnologies/strykelang)
 
-### `[KUBERNETES CLIENT FOR STRYKE // GET + APPLY + DELETE + SCALE + LOGS + WATCH + EXEC]`
+### `[KUBERNETES CLIENT FOR STRYKE // GET + APPLY + DELETE + SCALE + ROLLOUT + LABEL + CORDON + EVICT + EVENTS + TOP + WAIT + LOGS]`
 
 > *"Any kubeconfig-reachable cluster, no kubectl."*
 
@@ -232,9 +232,36 @@ K8s::scale             $kind, $name, $replicas, %opts → \%scale
 ```
 
 `patch` does a JSON merge patch by default (`type => "strategic"` for a
-strategic merge) — e.g. `kubectl rollout restart` is
-`K8s::patch "deploy", $name, { spec => { template => { metadata => { annotations =>
-{ "stryke.k8s/restartedAt" => $now } } } } }, type => "strategic"`.
+strategic merge). The common rollout/label/scheduling operations have
+dedicated wrappers below so callers don't hand-build patch documents.
+
+### Rollouts + workload ops
+
+```stryke
+K8s::set_image        $name, $container, $image, %opts → \%obj  # opts: kind, namespace
+K8s::rollout_restart  $name, %opts → \%obj          # opts: kind (default Deployment), namespace
+K8s::rollout_status   $name, %opts → \%status       # replicas / readyReplicas / conditions
+K8s::label            $kind, $name, \%labels, %opts → \%obj      # key => undef removes
+K8s::annotate         $kind, $name, \%annotations, %opts → \%obj
+```
+
+### Nodes + eviction
+
+```stryke
+K8s::cordon    $name, %opts → \%node       # spec.unschedulable = true
+K8s::uncordon  $name, %opts → \%node       # spec.unschedulable = false
+K8s::evict     $name, %opts → \%result     # graceful pod eviction; namespace required
+```
+
+### Events + metrics + wait
+
+```stryke
+K8s::events    %opts → @events             # opts: namespace, name (one object), limit
+K8s::top_pods  %opts → @podmetrics         # metrics.k8s.io; needs metrics-server
+K8s::top_nodes %opts → @nodemetrics
+K8s::wait      $kind, $name, %opts → \%ok  # opts: condition (default Ready, or "delete"),
+                                           # timeout (s, default 300), namespace
+```
 
 ### Logs + exec
 
@@ -260,9 +287,11 @@ K8s::pkg_version()    → $version_string    # cdylib's CARGO_PKG_VERSION
 Each `K8s::*` wrapper builds a JSON args dict and calls a sibling
 `k8s__*` symbol resolved out of `libstryke_k8s.{dylib,so}`. The cdylib
 is dlopened in-process on first `use K8s` (via stryke's
-`pkg::commands::try_load_ffi_for` resolver hook) and exposes 15 entry
+`pkg::commands::try_load_ffi_for` resolver hook) and exposes 28 entry
 points covering version/discovery, get/list, write paths (create / replace
-/ apply / delete / scale), and snapshot logs.
+/ apply / delete / scale / patch), rollouts (set_image / rollout_restart /
+rollout_status / label / annotate), node scheduling (cordon / uncordon /
+evict), events, metrics (top_pods / top_nodes), wait, and snapshot logs.
 
 **Persistent state:**
 

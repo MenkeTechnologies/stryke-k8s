@@ -179,3 +179,113 @@ fn K8s::exec ($pod, $cmd, %opts) {
     die "K8s::exec: streaming ops are deferred in v0.2.0 cdylib"
 }
 
+# ── labels / annotations ─────────────────────────────────────────────
+
+## Merge-patch metadata.labels. $labels is a hashref; a key => undef removes it.
+fn K8s::label ($kind, $name, $labels, %opts) {
+    die "K8s::label: labels must be hashref" unless ref($labels) eq "HASH"
+    val $r = K8s::_req(
+        { kind => $kind, name => $name, labels => $labels, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("label", k8s__label(to_json($r)))
+}
+
+## Merge-patch metadata.annotations. $annotations is a hashref; undef removes.
+fn K8s::annotate ($kind, $name, $annotations, %opts) {
+    die "K8s::annotate: annotations must be hashref" unless ref($annotations) eq "HASH"
+    val $r = K8s::_req(
+        { kind => $kind, name => $name, annotations => $annotations, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("annotate", k8s__annotate(to_json($r)))
+}
+
+# ── node scheduling ──────────────────────────────────────────────────
+
+## Cordon a node (spec.unschedulable = true).
+fn K8s::cordon ($name, %opts) {
+    val $r = K8s::_req({ name => $name }, \%opts)
+    K8s::_decode("cordon", k8s__cordon(to_json($r)))
+}
+
+## Uncordon a node (spec.unschedulable = false).
+fn K8s::uncordon ($name, %opts) {
+    val $r = K8s::_req({ name => $name }, \%opts)
+    K8s::_decode("uncordon", k8s__uncordon(to_json($r)))
+}
+
+## Evict a pod (graceful, respects PodDisruptionBudgets). Namespace required.
+fn K8s::evict ($name, %opts) {
+    die "K8s::evict: namespace => 'ns' required" unless defined $opts{namespace}
+    val $r = K8s::_req({ name => $name, namespace => $opts{namespace} }, \%opts)
+    K8s::_decode("evict", k8s__evict(to_json($r)))
+}
+
+# ── rollouts ─────────────────────────────────────────────────────────
+
+## Set a container's image (strategic merge). opts: kind (default Deployment),
+## namespace. $container is the container name to update.
+fn K8s::set_image ($name, $container, $image, %opts) {
+    val $r = K8s::_req(
+        { kind => ($opts{kind} // "Deployment"), name => $name,
+          container => $container, image => $image, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("set_image", k8s__set_image(to_json($r)))
+}
+
+## Trigger a rolling restart (stamps the pod-template restart annotation).
+## opts: kind (default Deployment), namespace.
+fn K8s::rollout_restart ($name, %opts) {
+    val $r = K8s::_req(
+        { kind => ($opts{kind} // "Deployment"), name => $name, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("rollout_restart", k8s__rollout_restart(to_json($r)))
+}
+
+## Return a workload's `.status` (replicas / readyReplicas / conditions).
+## opts: kind (default Deployment), namespace.
+fn K8s::rollout_status ($name, %opts) {
+    val $r = K8s::_req(
+        { kind => ($opts{kind} // "Deployment"), name => $name, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("rollout_status", k8s__rollout_status(to_json($r)))->{status}
+}
+
+# ── events / metrics / wait ──────────────────────────────────────────
+
+## List Events; opts: namespace, name (filter to one object's events), limit.
+fn K8s::events (%opts) {
+    val $r = K8s::_req(
+        { namespace => $opts{namespace}, name => $opts{name}, limit => $opts{limit} },
+        \%opts
+    )
+    @{ K8s::_decode("events", k8s__events(to_json($r)))->{events} }
+}
+
+## `top pods` via metrics.k8s.io (needs metrics-server). opts: namespace.
+fn K8s::top_pods (%opts) {
+    val $r = K8s::_req({ namespace => $opts{namespace} }, \%opts)
+    @{ K8s::_decode("top_pods", k8s__top_pods(to_json($r)))->{items} }
+}
+
+## `top nodes` via metrics.k8s.io (needs metrics-server).
+fn K8s::top_nodes (%opts) {
+    val $r = K8s::_req({}, \%opts)
+    @{ K8s::_decode("top_nodes", k8s__top_nodes(to_json($r)))->{items} }
+}
+
+## Block until $kind/$name meets $condition (a status condition type that
+## reads "True", or "delete" for disappearance). opts: namespace, timeout (s).
+fn K8s::wait ($kind, $name, %opts) {
+    val $r = K8s::_req(
+        { kind => $kind, name => $name, condition => ($opts{condition} // "Ready"),
+          timeout => $opts{timeout}, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("wait", k8s__wait(to_json($r)))
+}
+

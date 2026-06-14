@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic::AssertUnwindSafe;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use kube::api::{DeleteParams, DynamicObject, ListParams, PatchParams, PostParams};
@@ -374,6 +375,283 @@ async fn op_logs(opts: Value) -> Result<Value> {
     Ok(json!({"logs": text}))
 }
 
+// ── ops: mutation helpers ─────────────────────────────────────────────────────
+
+/// Resolve the dynamic Api handle for a kind + optional namespace in one step.
+async fn api_for(c: &Client, kind: &str, namespace: Option<&str>) -> Result<Api<DynamicObject>> {
+    let (ar, caps) = discover_kind(c, kind).await?;
+    Ok(dyn_api(c, &ar, &caps, namespace))
+}
+
+async fn op_label(opts: Value) -> Result<Value> {
+    metadata_merge(opts, "labels").await
+}
+
+async fn op_annotate(opts: Value) -> Result<Value> {
+    metadata_merge(opts, "annotations").await
+}
+
+/// LABEL / ANNOTATE share one shape: a JSON merge-patch into
+/// `metadata.{labels|annotations}`. A null map value removes that key
+/// (RFC 7386 merge semantics) — matches `kubectl label key-` / `annotate key-`.
+async fn metadata_merge(opts: Value, field: &str) -> Result<Value> {
+    let kind = opts["kind"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing kind"))?;
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let map = opts
+        .get(field)
+        .filter(|v| v.is_object())
+        .ok_or_else(|| anyhow!("missing {} (an object of key => value)", field))?;
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    let api = api_for(&c, kind, namespace).await?;
+    let patch = json!({ "metadata": { field: map } });
+    let out = api
+        .patch(
+            name,
+            &PatchParams::default(),
+            &kube::api::Patch::Merge(&patch),
+        )
+        .await?;
+    Ok(to_value(out))
+}
+
+async fn op_cordon(opts: Value) -> Result<Value> {
+    node_schedulable(opts, true).await
+}
+
+async fn op_uncordon(opts: Value) -> Result<Value> {
+    node_schedulable(opts, false).await
+}
+
+/// CORDON / UNCORDON toggle `spec.unschedulable` on a Node.
+async fn node_schedulable(opts: Value, unschedulable: bool) -> Result<Value> {
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name (node)"))?;
+    let c = get_client(&opts).await?;
+    let api: Api<k8s_openapi::api::core::v1::Node> = Api::all(c);
+    let patch = json!({ "spec": { "unschedulable": unschedulable } });
+    let out = api
+        .patch(
+            name,
+            &PatchParams::default(),
+            &kube::api::Patch::Merge(&patch),
+        )
+        .await?;
+    Ok(to_value(out))
+}
+
+async fn op_set_image(opts: Value) -> Result<Value> {
+    let kind = opts["kind"].as_str().unwrap_or("Deployment");
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let container = opts["container"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing container"))?;
+    let image = opts["image"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing image"))?;
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    let api = api_for(&c, kind, namespace).await?;
+    // Strategic merge keys containers by `name`, so only the named container's
+    // image changes — the rest of the pod template is untouched.
+    let patch = json!({
+        "spec": { "template": { "spec": {
+            "containers": [ { "name": container, "image": image } ]
+        }}}
+    });
+    let out = api
+        .patch(
+            name,
+            &PatchParams::default(),
+            &kube::api::Patch::Strategic(&patch),
+        )
+        .await?;
+    Ok(to_value(out))
+}
+
+async fn op_rollout_restart(opts: Value) -> Result<Value> {
+    let kind = opts["kind"].as_str().unwrap_or("Deployment");
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    let api = api_for(&c, kind, namespace).await?;
+    // Stamp the pod-template restart annotation with a changing value; any
+    // change to the template triggers a rolling restart (kubectl uses the same
+    // annotation with an RFC3339 time — the value only needs to differ).
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    let patch = json!({
+        "spec": { "template": { "metadata": { "annotations": {
+            "kubectl.kubernetes.io/restartedAt": stamp
+        }}}}
+    });
+    let out = api
+        .patch(
+            name,
+            &PatchParams::default(),
+            &kube::api::Patch::Strategic(&patch),
+        )
+        .await?;
+    Ok(to_value(out))
+}
+
+async fn op_rollout_status(opts: Value) -> Result<Value> {
+    let kind = opts["kind"].as_str().unwrap_or("Deployment");
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    let api = api_for(&c, kind, namespace).await?;
+    let obj = api.get(name).await?;
+    let status = to_value(&obj).get("status").cloned().unwrap_or(Value::Null);
+    Ok(json!({ "status": status }))
+}
+
+async fn op_events(opts: Value) -> Result<Value> {
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    let api: Api<k8s_openapi::api::core::v1::Event> = match namespace {
+        Some(ns) => Api::namespaced(c, ns),
+        None => Api::all(c),
+    };
+    let mut lp = ListParams::default();
+    // Scope to a single object's events when `name` is supplied.
+    if let Some(obj) = opts["name"].as_str() {
+        lp = lp.fields(&format!("involvedObject.name={}", obj));
+    }
+    if let Some(n) = opts["limit"].as_u64() {
+        lp = lp.limit(n as u32);
+    }
+    let list = api.list(&lp).await?;
+    let items: Vec<Value> = list
+        .items
+        .into_iter()
+        .map(|e| {
+            json!({
+                "type": e.type_,
+                "reason": e.reason,
+                "message": e.message,
+                "count": e.count,
+                "object": e.involved_object.name,
+                "kind": e.involved_object.kind,
+                "last_timestamp": e.last_timestamp.map(|t| t.0.to_rfc3339()),
+            })
+        })
+        .collect();
+    Ok(json!({ "events": items }))
+}
+
+async fn op_top_pods(opts: Value) -> Result<Value> {
+    let path = match opts["namespace"].as_str() {
+        Some(ns) => format!("/apis/metrics.k8s.io/v1beta1/namespaces/{}/pods", ns),
+        None => "/apis/metrics.k8s.io/v1beta1/pods".to_string(),
+    };
+    metrics_get(&opts, &path).await
+}
+
+async fn op_top_nodes(opts: Value) -> Result<Value> {
+    metrics_get(&opts, "/apis/metrics.k8s.io/v1beta1/nodes").await
+}
+
+/// Raw GET against the metrics.k8s.io API (requires metrics-server). Returns
+/// the decoded `items` array verbatim — usage is `.containers[].usage` for
+/// pods or `.usage` for nodes.
+async fn metrics_get(opts: &Value, path: &str) -> Result<Value> {
+    let c = get_client(opts).await?;
+    let req = http::Request::get(path).body(Vec::new())?;
+    let body: Value = c.request(req).await?;
+    Ok(json!({ "items": body.get("items").cloned().unwrap_or(Value::Null) }))
+}
+
+async fn op_evict(opts: Value) -> Result<Value> {
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name (pod)"))?;
+    let namespace = opts["namespace"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing namespace"))?;
+    let c = get_client(&opts).await?;
+    let path = format!("/api/v1/namespaces/{}/pods/{}/eviction", namespace, name);
+    let eviction = json!({
+        "apiVersion": "policy/v1",
+        "kind": "Eviction",
+        "metadata": { "name": name, "namespace": namespace }
+    });
+    let req = http::Request::post(&path)
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&eviction)?)?;
+    let _: Value = c.request(req).await.unwrap_or(Value::Null);
+    Ok(json!({ "ok": true, "evicted": name }))
+}
+
+async fn op_wait(opts: Value) -> Result<Value> {
+    let kind = opts["kind"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing kind"))?;
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let namespace = opts["namespace"].as_str();
+    // `condition`: a status.conditions[].type that must read "True", or the
+    // literal "delete" to wait for the object to disappear.
+    let condition = opts["condition"].as_str().unwrap_or("Ready");
+    let timeout_s = opts["timeout"].as_u64().unwrap_or(300);
+    let c = get_client(&opts).await?;
+    let api = api_for(&c, kind, namespace).await?;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_s);
+    loop {
+        let obj = api.get_opt(name).await?;
+        if condition.eq_ignore_ascii_case("delete") {
+            if obj.is_none() {
+                return Ok(json!({ "ok": true, "condition": "delete" }));
+            }
+        } else if let Some(o) = obj {
+            if condition_is_true(&to_value(&o), condition) {
+                return Ok(json!({ "ok": true, "condition": condition }));
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "wait: timed out after {}s waiting for {}/{} condition {}",
+                timeout_s,
+                kind,
+                name,
+                condition
+            ));
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// True when `status.conditions[type==cond].status == "True"`.
+fn condition_is_true(obj: &Value, cond: &str) -> bool {
+    obj.get("status")
+        .and_then(|s| s.get("conditions"))
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter().any(|c| {
+                c.get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.eq_ignore_ascii_case(cond))
+                    == Some(true)
+                    && c.get("status").and_then(|s| s.as_str()) == Some("True")
+            })
+        })
+        .unwrap_or(false)
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call_async<F, Fut>(args: *const c_char, handler: F) -> *const c_char
@@ -498,6 +776,66 @@ pub extern "C" fn k8s__scale(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__logs(args: *const c_char) -> *const c_char {
     ffi_call_async(args, op_logs)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__label(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_label)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__annotate(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_annotate)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__cordon(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_cordon)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__uncordon(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_uncordon)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__set_image(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_set_image)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__rollout_restart(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_rollout_restart)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__rollout_status(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_rollout_status)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__events(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_events)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__top_pods(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_top_pods)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__top_nodes(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_top_nodes)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__evict(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_evict)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__wait(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_wait)
 }
 
 #[cfg(test)]
@@ -1021,6 +1359,42 @@ mod tests {
                 "iteration {i}: repeated calls must not surface runtime-init errors; got: {v}"
             );
         }
+    }
+
+    /// `op_wait`'s success check: `status.conditions[type==cond].status=="True"`.
+    /// Case-insensitive on the type, but the status string must be exactly
+    /// "True" (k8s uses the literal strings "True"/"False"/"Unknown"). Pins
+    /// that a regression accepting "true"/truthy or matching the wrong
+    /// condition type can't slip a premature "ready" through.
+    #[test]
+    fn condition_is_true_matches_type_and_exact_true_status() {
+        let obj = json!({"status": {"conditions": [
+            {"type": "Progressing", "status": "True"},
+            {"type": "Available", "status": "False"},
+            {"type": "Ready", "status": "True"},
+        ]}});
+        assert!(condition_is_true(&obj, "Ready"));
+        assert!(
+            condition_is_true(&obj, "ready"),
+            "type match is case-insensitive"
+        );
+        assert!(
+            !condition_is_true(&obj, "Available"),
+            "status False must not pass"
+        );
+        assert!(!condition_is_true(&obj, "Nonexistent"));
+    }
+
+    #[test]
+    fn condition_is_true_false_when_no_conditions() {
+        assert!(!condition_is_true(&json!({}), "Ready"));
+        assert!(!condition_is_true(&json!({"status": {}}), "Ready"));
+        // A lowercase "true" status is NOT the k8s sentinel and must fail.
+        let obj = json!({"status": {"conditions": [{"type": "Ready", "status": "true"}]}});
+        assert!(
+            !condition_is_true(&obj, "Ready"),
+            "only exact \"True\" counts"
+        );
     }
 
     /// `k8s__patch` must validate kind/name/patch and the patch type BEFORE

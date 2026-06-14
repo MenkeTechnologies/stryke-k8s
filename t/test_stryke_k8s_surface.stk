@@ -37,4 +37,18 @@ assert_ok exists &K8s::logs_follow, "K8s::logs_follow exists"
 assert_ok exists &K8s::watch, "K8s::watch exists"
 assert_ok exists &K8s::exec, "K8s::exec exists"
 
+# ── K8s.stk extras (labels, scheduling, rollouts, events, metrics, wait) ──
+assert_ok exists &K8s::annotate, "K8s::annotate exists"
+assert_ok exists &K8s::cordon, "K8s::cordon exists"
+assert_ok exists &K8s::events, "K8s::events exists"
+assert_ok exists &K8s::evict, "K8s::evict exists"
+assert_ok exists &K8s::label, "K8s::label exists"
+assert_ok exists &K8s::rollout_restart, "K8s::rollout_restart exists"
+assert_ok exists &K8s::rollout_status, "K8s::rollout_status exists"
+assert_ok exists &K8s::set_image, "K8s::set_image exists"
+assert_ok exists &K8s::top_nodes, "K8s::top_nodes exists"
+assert_ok exists &K8s::top_pods, "K8s::top_pods exists"
+assert_ok exists &K8s::uncordon, "K8s::uncordon exists"
+assert_ok exists &K8s::wait, "K8s::wait exists"
+
 test_run
