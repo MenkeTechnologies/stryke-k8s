@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="stryke-k8s — KUBERNETES CLIENT FOR STRYKE // GET + APPLY + DELETE + SCALE + LOGS + WATCH + EXEC. Kubernetes client for stryke. Get / apply / delete / scale / logs / watch / exec against any kubeconfig-reachable cluster (kind, k3s, minikube, EKS, GKE, AKS, OpenShift, vanilla). Opt-in package, statically linked.">
+  <meta name="description" content="stryke-k8s — KUBERNETES CLIENT FOR STRYKE // GET + APPLY + DELETE + SCALE + LOGS + WATCH + EXEC. Kubernetes client for stryke. Get / apply / delete / scale / logs / watch / exec against any kubeconfig-reachable cluster (kind, k3s, minikube, EKS, GKE, AKS, OpenShift, vanilla). Opt-in package, kept out of the stryke core binary so the daily-driver install stays slim; ships as a Rust cdylib that stryke dlopens in-process on first `use K8s`.">
   <title>stryke-k8s — Documentation</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -86,7 +86,7 @@
             <span class="sep">/</span>
             <a href="https://github.com/MenkeTechnologies/MenkeTechnologiesMeta" target="_blank" rel="noopener noreferrer">Meta</a>
           </nav>
-          <p class="docs-build-line">stryke package · CLI launcher <code>k8s</code> · Rust helper <code>stryke-k8s-helper</code> · opt-in (kept out of stryke core)</p>
+          <p class="docs-build-line">stryke package · cdylib <code>libstryke_k8s.{dylib,so}</code> · dlopen'd in-process on <code>use K8s</code> · opt-in (kept out of stryke core)</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -108,60 +108,60 @@
 
     <main class="tutorial-main">
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>STRYKE-K8S</h2>
-      <p class="tutorial-subtitle"><strong>Any kubeconfig-reachable cluster, no kubectl.</strong> Kubernetes client for stryke. Get / apply / delete / scale / logs / watch / exec against any kubeconfig-reachable cluster (kind, k3s, minikube, EKS, GKE, AKS, OpenShift, vanilla). Opt-in package, statically linked.</p>
+      <p class="tutorial-subtitle"><strong>Any kubeconfig-reachable cluster, no kubectl.</strong> Kubernetes client for stryke. Get / apply / delete / scale / logs / watch / exec against any kubeconfig-reachable cluster (kind, k3s, minikube, EKS, GKE, AKS, OpenShift, vanilla). Opt-in package, kept out of the stryke core binary so the daily-driver install stays slim; ships as a Rust cdylib that stryke <code>dlopen</code>s in-process on first <code>use K8s</code>.</p>
 
       <section class="tutorial-section">
         <h2>Install</h2>
-<pre># build the helper binary, install as a stryke package
+<pre># from a release (no rustc on the consumer machine)
+s pkg install -g github.com/MenkeTechnologies/stryke-k8s
+
+# from a local checkout
 cd ~/projects/stryke-k8s
-cargo build --release
-s pkg install -g .
+cargo build --release            # produces target/release/libstryke_k8s.{dylib,so}
+s pkg install -g .               # cdylib lands in ~/.stryke/store/k8s@&lt;version&gt;/
 
 # one-liner
-make install
-
-# verify
-k8s --help</pre>
-        <p>After install, <code>k8s --help</code> works from anywhere on PATH (assuming <code>~/.stryke/bin/</code> is on PATH). The stryke library is auto-discoverable to any project that depends on the package via <code>[deps] k8s = { path = "..." }</code> or, when published, by name.</p>
+make install</pre>
+        <p>The cdylib is dlopened in-process on first <code>use K8s</code> &mdash; no helper-binary fork per call. A shared tokio runtime + <code>kube::Client</code> cache keyed by kubeconfig context is held in <code>OnceCell</code> for the life of the process. Any stryke script that declares <code>use K8s</code> resolves the package automatically.</p>
       </section>
 
       <section class="tutorial-section">
-        <h2>CLI: <code>k8s</code></h2>
+        <h2>Quick start: <code>use K8s</code></h2>
         <table class="example-tbl">
           <tbody>
-            <tr><td>list pods</td><td><code>k8s get pods -A</code></td></tr>
-            <tr><td>apply a manifest</td><td><code>k8s apply -f deployment.yaml</code></td></tr>
-            <tr><td>scale a deployment</td><td><code>k8s scale --replicas=5 deployment/my-app</code></td></tr>
-            <tr><td>tail logs</td><td><code>k8s logs -f my-pod</code></td></tr>
-            <tr><td>exec into a pod</td><td><code>k8s exec -it my-pod -- sh</code></td></tr>
-            <tr><td>watch namespace events</td><td><code>k8s watch events -n production</code></td></tr>
-            <tr><td>GVK shortcut: deployments</td><td><code>k8s get deploy</code></td></tr>
+            <tr><td>current context</td><td><code>p K8s::current_context()</code></td></tr>
+            <tr><td>server version</td><td><code>p K8s::version()-&gt;{gitVersion}</code></td></tr>
+            <tr><td>list pods</td><td><code>my @pods = K8s::get "pods", namespace =&gt; "default"</code></td></tr>
+            <tr><td>strict GVK</td><td><code>my @d = K8s::get "apps/v1/Deployment", namespace =&gt; "kube-system"</code></td></tr>
+            <tr><td>get one</td><td><code>my $pod = K8s::get_one "pod", "echo-7d9f", namespace =&gt; "default"</code></td></tr>
+            <tr><td>server-side apply</td><td><code>K8s::apply { apiVersion =&gt; "v1", kind =&gt; "ConfigMap", metadata =&gt; { name =&gt; "cfg", namespace =&gt; "ci" }, data =&gt; { hello =&gt; "world" } }</code></td></tr>
+            <tr><td>scale</td><td><code>K8s::scale "deploy", "echo", 5, namespace =&gt; "ci"</code></td></tr>
+            <tr><td>logs (buffered)</td><td><code>my $text = K8s::logs "echo-7d9f", namespace =&gt; "ci", tail =&gt; 100</code></td></tr>
+            <tr><td>delete (cascading on Namespace)</td><td><code>K8s::delete_resource "namespace", "ci"</code></td></tr>
           </tbody>
         </table>
-        <p>The full flag matrix lives in the <a href="https://github.com/MenkeTechnologies/stryke-k8s#0x03-cli-k8s">README "CLI" section</a>.</p>
+        <p>The full API lives in the <a href="https://github.com/MenkeTechnologies/stryke-k8s#0x04-api-reference">README "API reference" section</a>.</p>
       </section>
 
       <section class="tutorial-section">
         <h2>Why a package, not a builtin</h2>
         <p>Built on the <code>kube</code> crate (kube-client + kube-runtime). Drop-in replacement for kubectl one-liners that pipe through jq / yq / awk.</p>
-        <p>The stryke side is a thin NDJSON-pipe wrapper; the heavy code lives in the <code>stryke-k8s-helper</code> sidecar binary and is loaded on demand. Core stryke is never linked against this package's deps.</p>
+        <p>The stryke side is a thin <code>.stk</code> wrapper that calls <code>k8s__*</code> FFI symbols on the cdylib; the heavy code lives in <code>libstryke_k8s.{dylib,so}</code>, dlopened in-process on first <code>use K8s</code>. Core stryke is never linked against this package's deps.</p>
       </section>
 
       <section class="tutorial-section">
-        <h2>Helper protocol</h2>
-        <p>The <code>stryke-k8s-helper</code> sidecar speaks newline-delimited JSON over stdin/stdout. The stryke library shells out per call and pipes structured data both ways. This keeps stryke startup small while making the package's surface area available on demand.</p>
-<pre># manual invocation (debugging only)
-echo '{"op":"version"}' | stryke-k8s-helper</pre>
+        <h2>FFI layer</h2>
+        <p>Each <code>K8s::*</code> wrapper builds a JSON args dict and calls a sibling <code>k8s__*</code> symbol resolved out of <code>libstryke_k8s.{dylib,so}</code>. The cdylib is dlopened in-process on first <code>use K8s</code> (via stryke's <code>pkg::commands::try_load_ffi_for</code> resolver hook); a shared tokio <code>RUNTIME</code> + a <code>kube::Client</code> cache keyed by kubeconfig context is held in <code>OnceCell</code> &mdash; no fork-per-call, no fresh TLS+auth handshake each time. Responses are JSON; errors come back as <code>{"error": "&lt;msg&gt;"}</code> and the wrapper <code>die</code>s with the message.</p>
       </section>
 
       <section class="tutorial-section">
         <h2>Layout</h2>
 <pre>stryke-k8s/
-&#9500;&#9472;&#9472; Cargo.toml             # bin = stryke-k8s-helper (publish = false)
+&#9500;&#9472;&#9472; Cargo.toml             # cdylib crate manifest (crate-type = ["cdylib"], publish = false)
 &#9500;&#9472;&#9472; src/
-&#9474;   &#9492;&#9472;&#9472; main.rs           # helper binary entry point
-&#9500;&#9472;&#9472; lib/                   # stryke .stk wrapper(s)
-&#9500;&#9472;&#9472; stryke.toml            # stryke package manifest
+&#9474;   &#9492;&#9472;&#9472; lib.rs            # cdylib — k8s__* extern "C" exports
+&#9500;&#9472;&#9472; lib/                   # stryke .stk wrapper(s) — `use K8s`
+&#9500;&#9472;&#9472; stryke.toml            # stryke package manifest ([ffi] exports table)
 &#9500;&#9472;&#9472; t/                     # zunit-style tests
 &#9500;&#9472;&#9472; examples/              # runnable .stk examples
 &#9500;&#9472;&#9472; Makefile               # `make install` builds + installs
