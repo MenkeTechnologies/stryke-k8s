@@ -27,6 +27,18 @@ exports = [
     "k8s__delete",
     "k8s__scale",
     "k8s__logs",
+    "k8s__label",
+    "k8s__annotate",
+    "k8s__cordon",
+    "k8s__uncordon",
+    "k8s__set_image",
+    "k8s__rollout_restart",
+    "k8s__rollout_status",
+    "k8s__events",
+    "k8s__top_pods",
+    "k8s__top_nodes",
+    "k8s__evict",
+    "k8s__wait",
 ]
 
 [scripts]
