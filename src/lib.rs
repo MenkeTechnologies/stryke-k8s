@@ -652,6 +652,90 @@ fn condition_is_true(obj: &Value, cond: &str) -> bool {
         .unwrap_or(false)
 }
 
+async fn op_rollout_history(opts: Value) -> Result<Value> {
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    // Each rollout revision is a ReplicaSet owned by the Deployment; the
+    // revision number lives in its `deployment.kubernetes.io/revision` annotation.
+    let api = api_for(&c, "ReplicaSet", namespace).await?;
+    let list = api.list(&ListParams::default()).await?;
+    let mut revisions: Vec<Value> = list
+        .items
+        .iter()
+        .filter_map(|rs| {
+            let v = to_value(rs);
+            let owned = v["metadata"]["ownerReferences"]
+                .as_array()
+                .map(|refs| {
+                    refs.iter()
+                        .any(|r| r["kind"] == "Deployment" && r["name"] == name)
+                })
+                .unwrap_or(false);
+            if !owned {
+                return None;
+            }
+            Some(json!({
+                "name": v["metadata"]["name"],
+                "revision": v["metadata"]["annotations"]["deployment.kubernetes.io/revision"],
+                "created": v["metadata"]["creationTimestamp"],
+                "replicas": v["spec"]["replicas"],
+            }))
+        })
+        .collect();
+    // Newest revision first.
+    revisions.sort_by(|a, b| {
+        let ra = a["revision"]
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let rb = b["revision"]
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        rb.cmp(&ra)
+    });
+    Ok(json!({ "name": name, "revisions": revisions }))
+}
+
+async fn op_autoscale(opts: Value) -> Result<Value> {
+    let target_kind = opts["target_kind"].as_str().unwrap_or("Deployment");
+    let target_name = opts["target_name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing target_name"))?;
+    let name = opts["name"].as_str().unwrap_or(target_name);
+    let namespace = opts["namespace"].as_str();
+    let min = opts["min"].as_i64().unwrap_or(1);
+    let max = opts["max"]
+        .as_i64()
+        .ok_or_else(|| anyhow!("missing max (maxReplicas)"))?;
+    let cpu = opts["cpu_percent"].as_i64().unwrap_or(80);
+    let c = get_client(&opts).await?;
+    let mut doc = json!({
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "metadata": { "name": name },
+        "spec": {
+            "scaleTargetRef": { "apiVersion": "apps/v1", "kind": target_kind, "name": target_name },
+            "minReplicas": min,
+            "maxReplicas": max,
+            "metrics": [{
+                "type": "Resource",
+                "resource": { "name": "cpu", "target": { "type": "Utilization", "averageUtilization": cpu } }
+            }]
+        }
+    });
+    if let Some(ns) = namespace {
+        doc["metadata"]["namespace"] = json!(ns);
+    }
+    let api = api_for(&c, "HorizontalPodAutoscaler", namespace).await?;
+    let obj: DynamicObject = serde_json::from_value(doc)?;
+    let created = api.create(&PostParams::default(), &obj).await?;
+    Ok(to_value(created))
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call_async<F, Fut>(args: *const c_char, handler: F) -> *const c_char
@@ -836,6 +920,16 @@ pub extern "C" fn k8s__evict(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__wait(args: *const c_char) -> *const c_char {
     ffi_call_async(args, op_wait)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__rollout_history(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_rollout_history)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__autoscale(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_autoscale)
 }
 
 #[cfg(test)]

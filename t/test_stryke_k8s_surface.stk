@@ -51,4 +51,7 @@ assert_ok exists &K8s::top_pods, "K8s::top_pods exists"
 assert_ok exists &K8s::uncordon, "K8s::uncordon exists"
 assert_ok exists &K8s::wait, "K8s::wait exists"
 
+assert_ok exists &K8s::rollout_history, "K8s::rollout_history exists"
+assert_ok exists &K8s::autoscale, "K8s::autoscale exists"
+
 test_run

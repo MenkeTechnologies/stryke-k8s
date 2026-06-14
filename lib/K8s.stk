@@ -289,3 +289,23 @@ fn K8s::wait ($kind, $name, %opts) {
     K8s::_decode("wait", k8s__wait(to_json($r)))
 }
 
+## Rollout history of Deployment $name: the owned ReplicaSets as
+## { name, revision, created, replicas }, newest revision first. opts: namespace.
+fn K8s::rollout_history ($name, %opts) {
+    val $r = K8s::_req({ name => $name, namespace => $opts{namespace} }, \%opts)
+    @{ K8s::_decode("rollout_history", k8s__rollout_history(to_json($r)))->{revisions} }
+}
+
+## Create a HorizontalPodAutoscaler targeting $target_name. Required: max.
+## opts: name (default target_name), target_kind (default Deployment), min
+## (default 1), cpu_percent (default 80), namespace.
+fn K8s::autoscale ($target_name, $max, %opts) {
+    val $r = K8s::_req(
+        { target_name => $target_name, max => $max, name => $opts{name},
+          target_kind => ($opts{target_kind} // "Deployment"), min => ($opts{min} // 1),
+          cpu_percent => ($opts{cpu_percent} // 80), namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("autoscale", k8s__autoscale(to_json($r)))
+}
+

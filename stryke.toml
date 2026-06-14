@@ -39,6 +39,8 @@ exports = [
     "k8s__top_nodes",
     "k8s__evict",
     "k8s__wait",
+    "k8s__rollout_history",
+    "k8s__autoscale",
 ]
 
 [scripts]
