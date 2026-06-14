@@ -54,4 +54,7 @@ assert_ok exists &K8s::wait, "K8s::wait exists"
 assert_ok exists &K8s::rollout_history, "K8s::rollout_history exists"
 assert_ok exists &K8s::autoscale, "K8s::autoscale exists"
 
+assert_ok exists &K8s::taint, "K8s::taint exists"
+assert_ok exists &K8s::untaint, "K8s::untaint exists"
+
 test_run

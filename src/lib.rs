@@ -736,6 +736,40 @@ async fn op_autoscale(opts: Value) -> Result<Value> {
     Ok(to_value(created))
 }
 
+async fn op_taint(opts: Value) -> Result<Value> {
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name (node)"))?;
+    let key = opts["key"].as_str().ok_or_else(|| anyhow!("missing key"))?;
+    let remove = opts["remove"].as_bool().unwrap_or(false);
+    let c = get_client(&opts).await?;
+    let api: Api<k8s_openapi::api::core::v1::Node> = Api::all(c);
+    // Read-modify-write: taints is a list, so we rebuild it and patch the whole
+    // array (a merge patch on a list replaces it wholesale).
+    let node = api.get(name).await?;
+    let v = to_value(&node);
+    let mut taints: Vec<Value> = v["spec"]["taints"].as_array().cloned().unwrap_or_default();
+    // Drop any existing taint with the same key first (replace / remove semantics).
+    taints.retain(|t| t.get("key").and_then(|k| k.as_str()) != Some(key));
+    if !remove {
+        let effect = opts["effect"].as_str().unwrap_or("NoSchedule");
+        let mut taint = json!({ "key": key, "effect": effect });
+        if let Some(val) = opts["value"].as_str() {
+            taint["value"] = json!(val);
+        }
+        taints.push(taint);
+    }
+    let patch = json!({ "spec": { "taints": taints } });
+    let out = api
+        .patch(
+            name,
+            &PatchParams::default(),
+            &kube::api::Patch::Merge(&patch),
+        )
+        .await?;
+    Ok(to_value(out))
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call_async<F, Fut>(args: *const c_char, handler: F) -> *const c_char
@@ -930,6 +964,11 @@ pub extern "C" fn k8s__rollout_history(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__autoscale(args: *const c_char) -> *const c_char {
     ffi_call_async(args, op_autoscale)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__taint(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_taint)
 }
 
 #[cfg(test)]

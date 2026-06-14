@@ -243,6 +243,8 @@ K8s::rollout_restart  $name, %opts → \%obj          # opts: kind (default Depl
 K8s::rollout_status   $name, %opts → \%status       # replicas / readyReplicas / conditions
 K8s::rollout_history  $name, %opts → @revisions     # owned ReplicaSets, newest first
 K8s::autoscale        $target_name, $max, %opts → \%hpa  # create HPA; opts: min, cpu_percent, target_kind
+K8s::taint            $node, $key, %opts → \%node       # opts: value, effect (default NoSchedule)
+K8s::untaint          $node, $key, %opts → \%node       # remove taint by key
 K8s::label            $kind, $name, \%labels, %opts → \%obj      # key => undef removes
 K8s::annotate         $kind, $name, \%annotations, %opts → \%obj
 ```

@@ -309,3 +309,20 @@ fn K8s::autoscale ($target_name, $max, %opts) {
     K8s::_decode("autoscale", k8s__autoscale(to_json($r)))
 }
 
+## Add (or replace) a taint on node $name. opts: value, effect (NoSchedule|
+## PreferNoSchedule|NoExecute, default NoSchedule). Returns the patched node.
+fn K8s::taint ($name, $key, %opts) {
+    val $r = K8s::_req(
+        { name => $name, key => $key, value => $opts{value},
+          effect => ($opts{effect} // "NoSchedule") },
+        \%opts
+    )
+    K8s::_decode("taint", k8s__taint(to_json($r)))
+}
+
+## Remove the taint with $key from node $name.
+fn K8s::untaint ($name, $key, %opts) {
+    val $r = K8s::_req({ name => $name, key => $key, remove => \1 }, \%opts)
+    K8s::_decode("untaint", k8s__taint(to_json($r)))
+}
+
