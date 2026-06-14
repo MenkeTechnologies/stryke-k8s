@@ -1475,6 +1475,7 @@ dependencies = [
  "anyhow",
  "either",
  "futures-util",
+ "http",
  "k8s-openapi",
  "kube",
  "once_cell",
