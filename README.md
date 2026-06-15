@@ -249,6 +249,14 @@ K8s::label            $kind, $name, \%labels, %opts → \%obj      # key => unde
 K8s::annotate         $kind, $name, \%annotations, %opts → \%obj
 ```
 
+### Pure helpers (no cluster)
+
+```stryke
+K8s::valid_name($name, %opts)   → { name, mode, valid, reason }   # opts: mode => subdomain|label
+K8s::parse_selector($selector)  → @{ {key, op, value?, values?} }  # =, ==, !=, in, notin, exists
+K8s::parse_resource_ref($ref)   → { kind, name }                  # kind/name
+```
+
 ### Nodes + eviction
 
 ```stryke
@@ -291,11 +299,13 @@ K8s::pkg_version()    → $version_string    # cdylib's CARGO_PKG_VERSION
 Each `K8s::*` wrapper builds a JSON args dict and calls a sibling
 `k8s__*` symbol resolved out of `libstryke_k8s.{dylib,so}`. The cdylib
 is dlopened in-process on first `use K8s` (via stryke's
-`pkg::commands::try_load_ffi_for` resolver hook) and exposes 28 entry
-points covering version/discovery, get/list, write paths (create / replace
-/ apply / delete / scale / patch), rollouts (set_image / rollout_restart /
-rollout_status / label / annotate), node scheduling (cordon / uncordon /
-evict), events, metrics (top_pods / top_nodes), wait, and snapshot logs.
+`pkg::commands::try_load_ffi_for` resolver hook). Its exports cover
+version/discovery, get/list, write paths (create / replace / apply / delete
+/ scale / patch), rollouts (set_image / rollout_restart / rollout_status /
+label / annotate), node scheduling (cordon / uncordon / evict), events,
+metrics (top_pods / top_nodes), wait, snapshot logs, plus cluster-free
+helpers (valid_name / parse_selector / parse_resource_ref). The
+authoritative list is `[ffi].exports` in `stryke.toml`.
 
 **Persistent state:**
 

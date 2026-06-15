@@ -91,4 +91,26 @@ if ($alive) {
     assert_match qr/Deleting|Done/, $del->{status}, "delete Namespace: status Deleting/Done"
 }
 
+# ── pure helpers (no cluster — always run) ───────────────────────────
+assert_ok K8s::valid_name("my-app.v2")->{valid}, "valid_name: subdomain accepts dots"
+val $lbl = K8s::valid_name("my.app", mode => "label")
+assert_eq $lbl->{valid}, 0, "valid_name: label mode rejects dots"
+assert_eq K8s::valid_name("MyApp")->{valid}, 0, "valid_name: rejects uppercase"
+
+val @reqs = K8s::parse_selector("app=nginx,tier!=frontend,!canary")
+assert_eq scalar(@reqs), 3,            "parse_selector: three requirements"
+assert_eq $reqs[0]{key}, "app",        "parse_selector: equality key"
+assert_eq $reqs[0]{op},  "Equal",      "parse_selector: equality op"
+assert_eq $reqs[1]{op},  "NotEqual",   "parse_selector: not-equal op"
+assert_eq $reqs[2]{op},  "DoesNotExist", "parse_selector: !key existence"
+
+val @setb = K8s::parse_selector("env in (prod,staging)")
+assert_eq scalar(@setb), 1,                "parse_selector: paren comma stays together"
+assert_eq $setb[0]{op}, "In",              "parse_selector: set-based In"
+assert_eq scalar(@{ $setb[0]{values} }), 2, "parse_selector: two set values"
+
+val $rr = K8s::parse_resource_ref("deployment/web")
+assert_eq $rr->{kind}, "deployment", "parse_resource_ref: kind"
+assert_eq $rr->{name}, "web",        "parse_resource_ref: name"
+
 test_run

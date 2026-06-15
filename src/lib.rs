@@ -812,6 +812,141 @@ pub unsafe extern "C" fn stryke_free_cstring(p: *mut c_char) {
     drop(CString::from_raw(p));
 }
 
+// ── pure helpers (no cluster) ────────────────────────────────────────────────
+
+/// Validate a Kubernetes object name. `mode` is `subdomain` (default — RFC 1123
+/// subdomain: lowercase alphanumerics, `-`, `.`, ≤253 chars) or `label` (RFC
+/// 1123 label: no dots, ≤63). Must start/end alphanumeric. Returns
+/// `{valid, reason}`. Pure.
+fn op_valid_name(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let label = opts.get("mode").and_then(Value::as_str) == Some("label");
+    let max = if label { 63 } else { 253 };
+    let bytes = name.as_bytes();
+    let charset_ok = name.bytes().all(|b| {
+        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || (!label && b == b'.')
+    });
+    let reason: Option<&str> = if name.is_empty() {
+        Some("must not be empty")
+    } else if name.len() > max {
+        if label {
+            Some("must be at most 63 characters")
+        } else {
+            Some("must be at most 253 characters")
+        }
+    } else if !charset_ok {
+        if label {
+            Some("only lowercase alphanumerics and '-'")
+        } else {
+            Some("only lowercase alphanumerics, '-' and '.'")
+        }
+    } else if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+        Some("must start and end with an alphanumeric character")
+    } else {
+        None
+    };
+    Ok(json!({
+        "name": name,
+        "mode": if label { "label" } else { "subdomain" },
+        "valid": reason.is_none(),
+        "reason": reason,
+    }))
+}
+
+/// Split a label selector on top-level commas, ignoring commas inside the
+/// `(...)` of a set-based requirement.
+fn split_requirements(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for c in s.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(c);
+            }
+            ',' if depth == 0 => {
+                if !cur.trim().is_empty() {
+                    out.push(cur.trim().to_string());
+                }
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+fn set_values(s: &str) -> Vec<Value> {
+    s.trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| json!(v))
+        .collect()
+}
+
+/// Parse a Kubernetes label selector into requirements. Supports equality
+/// (`k=v`, `k==v`, `k!=v`), set-based (`k in (a,b)`, `k notin (a,b)`), and
+/// existence (`k`, `!k`). Each requirement is `{key, op, value?, values?}`
+/// where op ∈ Equal|NotEqual|In|NotIn|Exists|DoesNotExist. Pure.
+fn op_parse_selector(opts: Value) -> Result<Value> {
+    let sel = opts
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing selector"))?;
+    let mut reqs = Vec::new();
+    for raw in split_requirements(sel) {
+        if let Some(idx) = raw.find(" notin ") {
+            reqs.push(json!({"key": raw[..idx].trim(), "op": "NotIn", "values": set_values(&raw[idx + 7..])}));
+        } else if let Some(idx) = raw.find(" in ") {
+            reqs.push(json!({"key": raw[..idx].trim(), "op": "In", "values": set_values(&raw[idx + 4..])}));
+        } else if let Some((k, v)) = raw.split_once("!=") {
+            reqs.push(json!({"key": k.trim(), "op": "NotEqual", "value": v.trim()}));
+        } else if let Some((k, v)) = raw.split_once("==") {
+            reqs.push(json!({"key": k.trim(), "op": "Equal", "value": v.trim()}));
+        } else if let Some((k, v)) = raw.split_once('=') {
+            reqs.push(json!({"key": k.trim(), "op": "Equal", "value": v.trim()}));
+        } else if let Some(key) = raw.strip_prefix('!') {
+            reqs.push(json!({"key": key.trim(), "op": "DoesNotExist"}));
+        } else {
+            reqs.push(json!({"key": raw.trim(), "op": "Exists"}));
+        }
+    }
+    Ok(json!({"requirements": reqs}))
+}
+
+/// Parse a kubectl resource reference `kind/name` (or bare `kind`) into
+/// `{kind, name}`. Pure.
+fn op_parse_resource_ref(opts: Value) -> Result<Value> {
+    let r = opts
+        .get("ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing ref"))?;
+    let parts: Vec<&str> = r.split('/').collect();
+    let (kind, name) = match parts.as_slice() {
+        [k] => (*k, Value::Null),
+        [k, n] => (*k, json!(n)),
+        _ => return Err(anyhow!("invalid resource ref `{r}` (want kind/name)")),
+    };
+    if kind.is_empty() {
+        return Err(anyhow!("resource ref missing kind: {r}"));
+    }
+    Ok(json!({"kind": kind, "name": name}))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -969,6 +1104,21 @@ pub extern "C" fn k8s__autoscale(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__taint(args: *const c_char) -> *const c_char {
     ffi_call_async(args, op_taint)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__valid_name(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_valid_name(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__parse_selector(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_parse_selector(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__parse_resource_ref(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_parse_resource_ref(opts) })
 }
 
 #[cfg(test)]
@@ -1553,5 +1703,77 @@ mod tests {
                 "expected `{want}` for {arg}; got: {err}"
             );
         }
+    }
+
+    // ── pure helpers (no cluster) ────────────────────────────────────────────
+
+    #[test]
+    fn valid_name_subdomain_and_label_modes() {
+        assert_eq!(
+            op_valid_name(json!({"name": "my-app.v2"})).unwrap()["valid"],
+            json!(true)
+        );
+        // Dots are illegal in label mode.
+        let lbl = op_valid_name(json!({"name": "my.app", "mode": "label"})).unwrap();
+        assert_eq!(lbl["valid"], json!(false));
+        assert!(lbl["reason"].as_str().unwrap().contains("'-'"));
+        // Uppercase, leading dash, and over-length all fail.
+        assert_eq!(
+            op_valid_name(json!({"name": "MyApp"})).unwrap()["valid"],
+            json!(false)
+        );
+        assert_eq!(
+            op_valid_name(json!({"name": "-bad"})).unwrap()["valid"],
+            json!(false)
+        );
+        let long = op_valid_name(json!({"name": "a".repeat(64), "mode": "label"})).unwrap();
+        assert_eq!(long["valid"], json!(false));
+        assert!(long["reason"].as_str().unwrap().contains("63"));
+    }
+
+    #[test]
+    fn parse_selector_equality_and_existence() {
+        let v = op_parse_selector(json!({"selector": "app=nginx,tier!=frontend,!canary,ready"}))
+            .unwrap();
+        let reqs = v["requirements"].as_array().unwrap();
+        assert_eq!(reqs.len(), 4);
+        assert_eq!(
+            reqs[0],
+            json!({"key": "app", "op": "Equal", "value": "nginx"})
+        );
+        assert_eq!(
+            reqs[1],
+            json!({"key": "tier", "op": "NotEqual", "value": "frontend"})
+        );
+        assert_eq!(reqs[2], json!({"key": "canary", "op": "DoesNotExist"}));
+        assert_eq!(reqs[3], json!({"key": "ready", "op": "Exists"}));
+    }
+
+    #[test]
+    fn parse_selector_set_based_keeps_paren_commas_together() {
+        // The comma inside (prod,staging) must NOT split the requirement.
+        let v = op_parse_selector(json!({"selector": "env in (prod,staging),tier notin (db)"}))
+            .unwrap();
+        let reqs = v["requirements"].as_array().unwrap();
+        assert_eq!(
+            reqs.len(),
+            2,
+            "set-based commas stay inside their requirement"
+        );
+        assert_eq!(reqs[0]["op"], json!("In"));
+        assert_eq!(reqs[0]["values"], json!(["prod", "staging"]));
+        assert_eq!(reqs[1]["op"], json!("NotIn"));
+        assert_eq!(reqs[1]["values"], json!(["db"]));
+    }
+
+    #[test]
+    fn parse_resource_ref_kind_and_name() {
+        let v = op_parse_resource_ref(json!({"ref": "deployment/web"})).unwrap();
+        assert_eq!(v["kind"], json!("deployment"));
+        assert_eq!(v["name"], json!("web"));
+        let bare = op_parse_resource_ref(json!({"ref": "pods"})).unwrap();
+        assert_eq!(bare["kind"], json!("pods"));
+        assert_eq!(bare["name"], Value::Null);
+        assert!(op_parse_resource_ref(json!({"ref": "a/b/c"})).is_err());
     }
 }

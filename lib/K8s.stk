@@ -326,3 +326,24 @@ fn K8s::untaint ($name, $key, %opts) {
     K8s::_decode("untaint", k8s__taint(to_json($r)))
 }
 
+# ── pure helpers (no cluster) ─────────────────────────────────────────
+
+## Validate a Kubernetes object name. opts: mode => "subdomain" (default) or
+## "label". Returns { name, mode, valid, reason } (reason undef when valid).
+fn K8s::valid_name ($name, %opts) {
+    K8s::_decode("valid_name", k8s__valid_name(to_json({ name => $name, mode => $opts{mode} })))
+}
+
+## Parse a label selector into a list of requirements. Supports equality
+## (k=v, k==v, k!=v), set-based (k in (a,b), k notin (a,b)), and existence
+## (k, !k). Returns a list of { key, op, value?, values? }.
+fn K8s::parse_selector ($selector) {
+    @{ K8s::_decode("parse_selector", k8s__parse_selector(to_json({ selector => $selector })))->{requirements} }
+}
+
+## Parse a kubectl resource ref "kind/name" (or bare "kind") into a hashref
+## { kind, name } (name undef when only a kind is given).
+fn K8s::parse_resource_ref ($ref) {
+    K8s::_decode("parse_resource_ref", k8s__parse_resource_ref(to_json({ ref => $ref })))
+}
+
