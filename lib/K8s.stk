@@ -341,6 +341,14 @@ fn K8s::parse_selector ($selector) {
     @{ K8s::_decode("parse_selector", k8s__parse_selector(to_json({ selector => $selector })))->{requirements} }
 }
 
+## Build a label-selector string from a list of requirement hashrefs — inverse
+## of parse_selector. Each entry is { key, op, value?|values? } with op one of
+## Equal/NotEqual/In/NotIn/Exists/DoesNotExist. Returns the selector string.
+fn K8s::build_selector ($requirements) {
+    K8s::_decode("build_selector",
+        k8s__build_selector(to_json({ requirements => $requirements })))->{selector}
+}
+
 ## Parse a kubectl resource ref "kind/name" (or bare "kind") into a hashref
 ## { kind, name } (name undef when only a kind is given).
 fn K8s::parse_resource_ref ($ref) {

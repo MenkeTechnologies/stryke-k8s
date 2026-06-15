@@ -109,6 +109,19 @@ assert_eq scalar(@setb), 1,                "parse_selector: paren comma stays to
 assert_eq $setb[0]{op}, "In",              "parse_selector: set-based In"
 assert_eq scalar(@{ $setb[0]{values} }), 2, "parse_selector: two set values"
 
+# build_selector: inverse of parse_selector across all operator forms.
+val $sel = K8s::build_selector([
+    +{ key => "app",  op => "Equal",    value  => "nginx" },
+    +{ key => "tier", op => "NotEqual", value  => "frontend" },
+    +{ key => "env",  op => "In",       values => ["prod", "staging"] },
+    +{ key => "canary", op => "Exists" },
+    +{ key => "legacy", op => "DoesNotExist" },
+])
+assert_eq $sel, "app=nginx,tier!=frontend,env in (prod,staging),canary,!legacy", "build_selector: all operator forms"
+# Round-trips: build → parse reproduces the requirement count.
+assert_eq scalar(@{ [ K8s::parse_selector($sel) ] }), 5, "build_selector → parse_selector round-trips"
+assert_dies fn { K8s::build_selector([ +{ key => "x", op => "Bogus" } ]) }, "build_selector: rejects unknown op"
+
 val $rr = K8s::parse_resource_ref("deployment/web")
 assert_eq $rr->{kind}, "deployment", "parse_resource_ref: kind"
 assert_eq $rr->{name}, "web",        "parse_resource_ref: name"

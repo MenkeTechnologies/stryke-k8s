@@ -928,6 +928,47 @@ fn op_parse_selector(opts: Value) -> Result<Value> {
     Ok(json!({"requirements": reqs}))
 }
 
+/// Build a label-selector string from a `requirements` list — the inverse of
+/// `parse_selector`. Each entry is `{key, op, value?|values?}` with op one of
+/// Equal/NotEqual/In/NotIn/Exists/DoesNotExist; entries are joined with `,`.
+/// Pure.
+fn op_build_selector(opts: Value) -> Result<Value> {
+    let reqs = opts
+        .get("requirements")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing requirements (array)"))?;
+    let join_values = |v: Option<&Value>| -> Result<String> {
+        let arr = v
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("set-based op needs `values` array"))?;
+        Ok(arr
+            .iter()
+            .map(|x| x.as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+            .join(","))
+    };
+    let mut parts = Vec::new();
+    for r in reqs {
+        let key = r
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("requirement missing key"))?;
+        let op = r.get("op").and_then(Value::as_str).unwrap_or("Equal");
+        let val = || r.get("value").and_then(Value::as_str).unwrap_or("");
+        let part = match op {
+            "Equal" => format!("{key}={}", val()),
+            "NotEqual" => format!("{key}!={}", val()),
+            "In" => format!("{key} in ({})", join_values(r.get("values"))?),
+            "NotIn" => format!("{key} notin ({})", join_values(r.get("values"))?),
+            "Exists" => key.to_string(),
+            "DoesNotExist" => format!("!{key}"),
+            other => return Err(anyhow!("unknown selector op `{other}`")),
+        };
+        parts.push(part);
+    }
+    Ok(json!({"selector": parts.join(",")}))
+}
+
 /// Parse a kubectl resource reference `kind/name` (or bare `kind`) into
 /// `{kind, name}`. Pure.
 fn op_parse_resource_ref(opts: Value) -> Result<Value> {
@@ -1158,6 +1199,11 @@ pub extern "C" fn k8s__valid_name(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__parse_selector(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_parse_selector(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__build_selector(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_build_selector(opts) })
 }
 
 #[no_mangle]
@@ -1813,6 +1859,37 @@ mod tests {
         assert_eq!(reqs[0]["values"], json!(["prod", "staging"]));
         assert_eq!(reqs[1]["op"], json!("NotIn"));
         assert_eq!(reqs[1]["values"], json!(["db"]));
+    }
+
+    #[test]
+    fn build_selector_inverts_parse_selector() {
+        // Every operator form round-trips: equality, inequality, set-based, existence.
+        let reqs = json!({"requirements": [
+            {"key": "app", "op": "Equal", "value": "nginx"},
+            {"key": "tier", "op": "NotEqual", "value": "frontend"},
+            {"key": "env", "op": "In", "values": ["prod", "staging"]},
+            {"key": "zone", "op": "NotIn", "values": ["db"]},
+            {"key": "canary", "op": "Exists"},
+            {"key": "legacy", "op": "DoesNotExist"},
+        ]});
+        let sel = op_build_selector(reqs).unwrap()["selector"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            sel,
+            "app=nginx,tier!=frontend,env in (prod,staging),zone notin (db),canary,!legacy"
+        );
+        // Round-trip back through parse_selector reproduces the requirement set.
+        let back = op_parse_selector(json!({"selector": sel})).unwrap();
+        let rs = back["requirements"].as_array().unwrap();
+        assert_eq!(rs.len(), 6);
+        assert_eq!(rs[0]["op"], json!("Equal"));
+        assert_eq!(rs[2]["values"], json!(["prod", "staging"]));
+        assert_eq!(rs[5]["op"], json!("DoesNotExist"));
+        // Unknown op and missing values are rejected.
+        assert!(op_build_selector(json!({"requirements": [{"key": "x", "op": "Bogus"}]})).is_err());
+        assert!(op_build_selector(json!({"requirements": [{"key": "x", "op": "In"}]})).is_err());
     }
 
     #[test]
