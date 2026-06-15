@@ -347,3 +347,12 @@ fn K8s::parse_resource_ref ($ref) {
     K8s::_decode("parse_resource_ref", k8s__parse_resource_ref(to_json({ ref => $ref })))
 }
 
+## Parse a resource quantity ("100Mi", "500m", "2Gi", "1.5", "1e3") into a
+## hashref { quantity, number, suffix, value }. Binary suffixes (Ki/Mi/Gi/Ti/
+## Pi/Ei) are powers of 1024; decimal suffixes (n/u/m/k/M/G/T/P/E) are powers of
+## 1000. `value` is the base-unit amount (bytes for memory, cores for CPU — so
+## "500m" yields 0.5).
+fn K8s::parse_quantity ($quantity) {
+    K8s::_decode("parse_quantity", k8s__parse_quantity(to_json({ quantity => $quantity })))
+}
+

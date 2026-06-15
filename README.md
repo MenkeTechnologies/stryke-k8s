@@ -255,7 +255,13 @@ K8s::annotate         $kind, $name, \%annotations, %opts → \%obj
 K8s::valid_name($name, %opts)   → { name, mode, valid, reason }   # opts: mode => subdomain|label
 K8s::parse_selector($selector)  → @{ {key, op, value?, values?} }  # =, ==, !=, in, notin, exists
 K8s::parse_resource_ref($ref)   → { kind, name }                  # kind/name
+K8s::parse_quantity($qty)       → { quantity, number, suffix, value }  # 100Mi→bytes, 500m→0.5 cores
 ```
+
+`parse_quantity` resolves a resource quantity to its base-unit `value`:
+binary suffixes (`Ki`/`Mi`/`Gi`/`Ti`/`Pi`/`Ei`) are powers of 1024, decimal
+suffixes (`n`/`u`/`m`/`k`/`M`/`G`/`T`/`P`/`E`) powers of 1000 — so `100Mi`
+→ `104857600` bytes and `500m` → `0.5` cores.
 
 ### Nodes + eviction
 
@@ -304,7 +310,7 @@ version/discovery, get/list, write paths (create / replace / apply / delete
 / scale / patch), rollouts (set_image / rollout_restart / rollout_status /
 label / annotate), node scheduling (cordon / uncordon / evict), events,
 metrics (top_pods / top_nodes), wait, snapshot logs, plus cluster-free
-helpers (valid_name / parse_selector / parse_resource_ref). The
+helpers (valid_name / parse_selector / parse_resource_ref / parse_quantity). The
 authoritative list is `[ffi].exports` in `stryke.toml`.
 
 **Persistent state:**

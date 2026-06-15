@@ -947,6 +947,50 @@ fn op_parse_resource_ref(opts: Value) -> Result<Value> {
     Ok(json!({"kind": kind, "name": name}))
 }
 
+/// Parse a Kubernetes resource quantity (`100Mi`, `500m`, `2Gi`, `1.5`, `1e3`)
+/// into its base-unit value. Binary suffixes (Ki/Mi/Gi/Ti/Pi/Ei) are powers of
+/// 1024; decimal suffixes (n/u/m/k/M/G/T/P/E) are powers of 1000. `value` is in
+/// base units (bytes for memory, cores for CPU — so `500m` → 0.5). Pure.
+fn op_parse_quantity(opts: Value) -> Result<Value> {
+    let q = opts
+        .get("quantity")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing quantity"))?;
+    let q = q.trim();
+    // The suffix is the maximal trailing run of ASCII letters; the rest is the
+    // (possibly decimal or exponential) number.
+    let num_end = q.trim_end_matches(|c: char| c.is_ascii_alphabetic()).len();
+    let (num_str, suffix) = q.split_at(num_end);
+    let mult: f64 = match suffix {
+        "" => 1.0,
+        "n" => 1e-9,
+        "u" => 1e-6,
+        "m" => 1e-3,
+        "k" => 1e3,
+        "M" => 1e6,
+        "G" => 1e9,
+        "T" => 1e12,
+        "P" => 1e15,
+        "E" => 1e18,
+        "Ki" => 2f64.powi(10),
+        "Mi" => 2f64.powi(20),
+        "Gi" => 2f64.powi(30),
+        "Ti" => 2f64.powi(40),
+        "Pi" => 2f64.powi(50),
+        "Ei" => 2f64.powi(60),
+        other => return Err(anyhow!("unknown quantity suffix `{other}`")),
+    };
+    let number: f64 = num_str
+        .parse()
+        .map_err(|_| anyhow!("invalid quantity number `{num_str}`"))?;
+    Ok(json!({
+        "quantity": q,
+        "number": number,
+        "suffix": suffix,
+        "value": number * mult,
+    }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1119,6 +1163,11 @@ pub extern "C" fn k8s__parse_selector(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__parse_resource_ref(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_parse_resource_ref(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__parse_quantity(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_parse_quantity(opts) })
 }
 
 #[cfg(test)]
@@ -1775,5 +1824,40 @@ mod tests {
         assert_eq!(bare["kind"], json!("pods"));
         assert_eq!(bare["name"], Value::Null);
         assert!(op_parse_resource_ref(json!({"ref": "a/b/c"})).is_err());
+    }
+
+    #[test]
+    fn parse_quantity_binary_decimal_and_milli() {
+        // Binary memory suffix → bytes (power of 1024).
+        let mem = op_parse_quantity(json!({"quantity": "100Mi"})).unwrap();
+        assert_eq!(
+            mem["value"],
+            json!(104857600.0),
+            "100Mi = 100 * 1024^2 bytes"
+        );
+        assert_eq!(mem["suffix"], json!("Mi"));
+        assert_eq!(
+            op_parse_quantity(json!({"quantity": "2Gi"})).unwrap()["value"],
+            json!(2147483648.0)
+        );
+        // Milli-CPU → fractional cores.
+        let cpu = op_parse_quantity(json!({"quantity": "500m"})).unwrap();
+        assert_eq!(cpu["value"], json!(0.5), "500m = 0.5 cores");
+        // Decimal SI and bare/exponent numbers.
+        assert_eq!(
+            op_parse_quantity(json!({"quantity": "1k"})).unwrap()["value"],
+            json!(1000.0)
+        );
+        assert_eq!(
+            op_parse_quantity(json!({"quantity": "1.5"})).unwrap()["value"],
+            json!(1.5)
+        );
+        assert_eq!(
+            op_parse_quantity(json!({"quantity": "1e3"})).unwrap()["value"],
+            json!(1000.0)
+        );
+        // Unknown suffix and garbage number error.
+        assert!(op_parse_quantity(json!({"quantity": "5Xi"})).is_err());
+        assert!(op_parse_quantity(json!({"quantity": "abc"})).is_err());
     }
 }

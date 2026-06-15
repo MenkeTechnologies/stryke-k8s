@@ -113,4 +113,15 @@ val $rr = K8s::parse_resource_ref("deployment/web")
 assert_eq $rr->{kind}, "deployment", "parse_resource_ref: kind"
 assert_eq $rr->{name}, "web",        "parse_resource_ref: name"
 
+# parse_quantity: binary memory, milli-CPU, decimal SI, bare/exponent numbers.
+val $mem = K8s::parse_quantity("100Mi")
+assert_eq $mem->{value},  104857600, "parse_quantity: 100Mi = 100*1024^2 bytes"
+assert_eq $mem->{suffix}, "Mi",      "parse_quantity: binary suffix preserved"
+val $cpu = K8s::parse_quantity("500m")
+assert_eq $cpu->{value}, 0.5,        "parse_quantity: 500m = 0.5 cores"
+assert_eq K8s::parse_quantity("2Gi")->{value}, 2147483648, "parse_quantity: 2Gi bytes"
+assert_eq K8s::parse_quantity("1k")->{value},  1000,       "parse_quantity: decimal k = 1000"
+assert_eq K8s::parse_quantity("1.5")->{value}, 1.5,        "parse_quantity: bare decimal"
+assert_eq K8s::parse_quantity("1e3")->{value}, 1000,       "parse_quantity: exponent number"
+
 test_run

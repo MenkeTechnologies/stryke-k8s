@@ -57,4 +57,9 @@ assert_ok exists &K8s::autoscale, "K8s::autoscale exists"
 assert_ok exists &K8s::taint, "K8s::taint exists"
 assert_ok exists &K8s::untaint, "K8s::untaint exists"
 
+assert_ok exists &K8s::valid_name, "K8s::valid_name exists"
+assert_ok exists &K8s::parse_selector, "K8s::parse_selector exists"
+assert_ok exists &K8s::parse_resource_ref, "K8s::parse_resource_ref exists"
+assert_ok exists &K8s::parse_quantity, "K8s::parse_quantity exists"
+
 test_run
