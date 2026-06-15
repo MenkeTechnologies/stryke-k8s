@@ -988,21 +988,10 @@ fn op_parse_resource_ref(opts: Value) -> Result<Value> {
     Ok(json!({"kind": kind, "name": name}))
 }
 
-/// Parse a Kubernetes resource quantity (`100Mi`, `500m`, `2Gi`, `1.5`, `1e3`)
-/// into its base-unit value. Binary suffixes (Ki/Mi/Gi/Ti/Pi/Ei) are powers of
-/// 1024; decimal suffixes (n/u/m/k/M/G/T/P/E) are powers of 1000. `value` is in
-/// base units (bytes for memory, cores for CPU — so `500m` → 0.5). Pure.
-fn op_parse_quantity(opts: Value) -> Result<Value> {
-    let q = opts
-        .get("quantity")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing quantity"))?;
-    let q = q.trim();
-    // The suffix is the maximal trailing run of ASCII letters; the rest is the
-    // (possibly decimal or exponential) number.
-    let num_end = q.trim_end_matches(|c: char| c.is_ascii_alphabetic()).len();
-    let (num_str, suffix) = q.split_at(num_end);
-    let mult: f64 = match suffix {
+/// Multiplier for a Kubernetes resource-quantity suffix: binary (Ki…Ei, powers
+/// of 1024) and decimal (n…E, powers of 1000). `None` for an unknown suffix.
+fn quantity_multiplier(suffix: &str) -> Option<f64> {
+    Some(match suffix {
         "" => 1.0,
         "n" => 1e-9,
         "u" => 1e-6,
@@ -1019,8 +1008,36 @@ fn op_parse_quantity(opts: Value) -> Result<Value> {
         "Ti" => 2f64.powi(40),
         "Pi" => 2f64.powi(50),
         "Ei" => 2f64.powi(60),
-        other => return Err(anyhow!("unknown quantity suffix `{other}`")),
-    };
+        _ => return None,
+    })
+}
+
+/// Binary suffixes from largest to smallest, for picking a compact rendering.
+const BINARY_SUFFIXES: &[(&str, i32)] = &[
+    ("Ei", 60),
+    ("Pi", 50),
+    ("Ti", 40),
+    ("Gi", 30),
+    ("Mi", 20),
+    ("Ki", 10),
+];
+
+/// Parse a Kubernetes resource quantity (`100Mi`, `500m`, `2Gi`, `1.5`, `1e3`)
+/// into its base-unit value. Binary suffixes (Ki/Mi/Gi/Ti/Pi/Ei) are powers of
+/// 1024; decimal suffixes (n/u/m/k/M/G/T/P/E) are powers of 1000. `value` is in
+/// base units (bytes for memory, cores for CPU — so `500m` → 0.5). Pure.
+fn op_parse_quantity(opts: Value) -> Result<Value> {
+    let q = opts
+        .get("quantity")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing quantity"))?;
+    let q = q.trim();
+    // The suffix is the maximal trailing run of ASCII letters; the rest is the
+    // (possibly decimal or exponential) number.
+    let num_end = q.trim_end_matches(|c: char| c.is_ascii_alphabetic()).len();
+    let (num_str, suffix) = q.split_at(num_end);
+    let mult =
+        quantity_multiplier(suffix).ok_or_else(|| anyhow!("unknown quantity suffix `{suffix}`"))?;
     let number: f64 = num_str
         .parse()
         .map_err(|_| anyhow!("invalid quantity number `{num_str}`"))?;
@@ -1029,6 +1046,43 @@ fn op_parse_quantity(opts: Value) -> Result<Value> {
         "number": number,
         "suffix": suffix,
         "value": number * mult,
+    }))
+}
+
+/// Render a base-unit `value` as a Kubernetes quantity string — the inverse of
+/// `parse_quantity`. With an explicit `suffix` the value is divided by that
+/// suffix's multiplier (`104857600, "Mi"` → `100Mi`). Without one, the largest
+/// binary suffix that divides the value exactly is chosen (`104857600` →
+/// `100Mi`, `100` → `100`). Returns `{quantity, number, suffix, value}`. Pure.
+fn op_format_quantity(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let suffix = match opts.get("suffix").and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => BINARY_SUFFIXES
+            .iter()
+            .find(|(_, pow)| {
+                let mult = 2f64.powi(*pow);
+                value.abs() >= mult && (value / mult).fract() == 0.0
+            })
+            .map(|(name, _)| name.to_string())
+            .unwrap_or_default(),
+    };
+    let mult = quantity_multiplier(&suffix)
+        .ok_or_else(|| anyhow!("unknown quantity suffix `{suffix}`"))?;
+    let number = value / mult;
+    let num_str = if number.fract() == 0.0 {
+        format!("{}", number as i64)
+    } else {
+        format!("{number}")
+    };
+    Ok(json!({
+        "quantity": format!("{num_str}{suffix}"),
+        "number": number,
+        "suffix": suffix,
+        "value": value,
     }))
 }
 
@@ -1214,6 +1268,11 @@ pub extern "C" fn k8s__parse_resource_ref(args: *const c_char) -> *const c_char 
 #[no_mangle]
 pub extern "C" fn k8s__parse_quantity(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_parse_quantity(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__format_quantity(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_format_quantity(opts) })
 }
 
 #[cfg(test)]
@@ -1936,5 +1995,43 @@ mod tests {
         // Unknown suffix and garbage number error.
         assert!(op_parse_quantity(json!({"quantity": "5Xi"})).is_err());
         assert!(op_parse_quantity(json!({"quantity": "abc"})).is_err());
+    }
+
+    #[test]
+    fn format_quantity_inverts_parse_quantity() {
+        // Explicit suffix: value / multiplier.
+        assert_eq!(
+            op_format_quantity(json!({"value": 104857600, "suffix": "Mi"})).unwrap()["quantity"],
+            json!("100Mi")
+        );
+        assert_eq!(
+            op_format_quantity(json!({"value": 0.5, "suffix": "m"})).unwrap()["quantity"],
+            json!("500m")
+        );
+        // Auto-suffix: pick the largest binary unit that divides exactly.
+        assert_eq!(
+            op_format_quantity(json!({"value": 104857600})).unwrap()["quantity"],
+            json!("100Mi")
+        );
+        assert_eq!(
+            op_format_quantity(json!({"value": 2147483648i64})).unwrap()["quantity"],
+            json!("2Gi")
+        );
+        // A plain number that no binary suffix divides stays bare.
+        assert_eq!(
+            op_format_quantity(json!({"value": 100})).unwrap()["quantity"],
+            json!("100")
+        );
+        // Round-trip: parse(format(v)) == v across binary, decimal, and bare.
+        for v in [104857600.0, 2147483648.0, 0.5, 100.0, 1500.0] {
+            let q = op_format_quantity(json!({"value": v})).unwrap()["quantity"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let back = op_parse_quantity(json!({"quantity": q})).unwrap();
+            assert_eq!(back["value"].as_f64().unwrap(), v, "round-trips {v}");
+        }
+        assert!(op_format_quantity(json!({"value": 1, "suffix": "Xi"})).is_err());
+        assert!(op_format_quantity(json!({})).is_err());
     }
 }

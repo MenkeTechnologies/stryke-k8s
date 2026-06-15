@@ -137,4 +137,13 @@ assert_eq K8s::parse_quantity("1k")->{value},  1000,       "parse_quantity: deci
 assert_eq K8s::parse_quantity("1.5")->{value}, 1.5,        "parse_quantity: bare decimal"
 assert_eq K8s::parse_quantity("1e3")->{value}, 1000,       "parse_quantity: exponent number"
 
+# format_quantity: inverse of parse_quantity.
+assert_eq K8s::format_quantity(104857600, "Mi")->{quantity}, "100Mi", "format_quantity: explicit Mi suffix"
+assert_eq K8s::format_quantity(0.5, "m")->{quantity},        "500m",  "format_quantity: milli-CPU"
+assert_eq K8s::format_quantity(104857600)->{quantity},      "100Mi", "format_quantity: auto-picks largest binary suffix"
+assert_eq K8s::format_quantity(100)->{quantity},            "100",   "format_quantity: bare number when no binary divisor"
+# round-trip back through parse_quantity.
+assert_eq K8s::parse_quantity(K8s::format_quantity(2147483648)->{quantity})->{value}, 2147483648, "format_quantity → parse_quantity round-trips 2Gi"
+assert_dies fn { K8s::format_quantity(1, "Xi") }, "format_quantity: rejects unknown suffix"
+
 test_run
