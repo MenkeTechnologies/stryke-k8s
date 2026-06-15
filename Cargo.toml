@@ -1,6 +1,6 @@
 [package]
 name = "stryke-k8s"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Kubernetes cdylib for the stryke `k8s` package — dlopened in-process via stryke's FFI bridge"
 authors = ["MenkeTechnologies"]

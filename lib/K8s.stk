@@ -334,6 +334,13 @@ fn K8s::valid_name ($name, %opts) {
     K8s::_decode("valid_name", k8s__valid_name(to_json({ name => $name, mode => $opts{mode} })))
 }
 
+## Validate a Kubernetes label VALUE (distinct from a name): empty is valid;
+## else <=63 chars, begin/end alphanumeric, only alphanumerics + - _ . between.
+## Uppercase and _ are allowed, unlike names. Returns { value, valid, reason }.
+fn K8s::valid_label_value ($value) {
+    K8s::_decode("valid_label_value", k8s__valid_label_value(to_json({ value => $value })))
+}
+
 ## Parse a label selector into a list of requirements. Supports equality
 ## (k=v, k==v, k!=v), set-based (k in (a,b), k notin (a,b)), and existence
 ## (k, !k). Returns a list of { key, op, value?, values? }.

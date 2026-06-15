@@ -97,6 +97,17 @@ val $lbl = K8s::valid_name("my.app", mode => "label")
 assert_eq $lbl->{valid}, 0, "valid_name: label mode rejects dots"
 assert_eq K8s::valid_name("MyApp")->{valid}, 0, "valid_name: rejects uppercase"
 
+# valid_label_value: label VALUE rules (distinct from names — empty/uppercase/_ ok).
+assert_ok K8s::valid_label_value("")->{valid},           "valid_label_value: empty is valid"
+assert_ok K8s::valid_label_value("Production")->{valid}, "valid_label_value: uppercase allowed"
+assert_ok K8s::valid_label_value("v1.2.3")->{valid},     "valid_label_value: dots and digits"
+assert_ok K8s::valid_label_value("my_value-1")->{valid}, "valid_label_value: underscore and dash allowed"
+assert_eq K8s::valid_label_value("-bad")->{valid}, 0,    "valid_label_value: must start alphanumeric"
+assert_eq K8s::valid_label_value("a b")->{valid}, 0,     "valid_label_value: rejects spaces"
+val $tl = K8s::valid_label_value("a" x 64)
+assert_eq $tl->{valid}, 0,                               "valid_label_value: over 63 chars fails"
+assert_match qr/63/, $tl->{reason},                      "valid_label_value: reason names the limit"
+
 val @reqs = K8s::parse_selector("app=nginx,tier!=frontend,!canary")
 assert_eq scalar(@reqs), 3,            "parse_selector: three requirements"
 assert_eq $reqs[0]{key}, "app",        "parse_selector: equality key"

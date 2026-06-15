@@ -856,6 +856,35 @@ fn op_valid_name(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Validate a Kubernetes label *value* (distinct from a label/name, which
+/// `valid_name` covers). Per apimachinery's `IsValidLabelValue`: an empty value
+/// is valid; otherwise it must be ≤63 characters, begin and end with an
+/// alphanumeric, and contain only alphanumerics, `-`, `_`, and `.` between.
+/// Unlike resource names, uppercase and `_` are allowed. Returns
+/// `{value, valid, reason}`. Pure.
+fn op_valid_label_value(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let bytes = value.as_bytes();
+    let reason: Option<&str> = if value.is_empty() {
+        None // an empty label value is valid
+    } else if value.len() > 63 {
+        Some("must be at most 63 characters")
+    } else if !value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    {
+        Some("only alphanumerics, '-', '_', and '.'")
+    } else if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+        Some("must begin and end with an alphanumeric character")
+    } else {
+        None
+    };
+    Ok(json!({"value": value, "valid": reason.is_none(), "reason": reason}))
+}
+
 /// Split a label selector on top-level commas, ignoring commas inside the
 /// `(...)` of a set-based requirement.
 fn split_requirements(s: &str) -> Vec<String> {
@@ -1297,6 +1326,11 @@ pub extern "C" fn k8s__taint(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__valid_name(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_valid_name(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__valid_label_value(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_valid_label_value(opts) })
 }
 
 #[no_mangle]
@@ -1935,6 +1969,42 @@ mod tests {
             json!(false)
         );
         let long = op_valid_name(json!({"name": "a".repeat(64), "mode": "label"})).unwrap();
+        assert_eq!(long["valid"], json!(false));
+        assert!(long["reason"].as_str().unwrap().contains("63"));
+    }
+
+    #[test]
+    fn valid_label_value_follows_apimachinery_rules() {
+        let ok = |v: &str| {
+            op_valid_label_value(json!({ "value": v })).unwrap()["valid"]
+                .as_bool()
+                .unwrap()
+        };
+        // Empty is valid; uppercase / underscore / dot are allowed (unlike names).
+        assert!(ok(""), "empty label value is valid");
+        assert!(ok("Production"), "uppercase allowed");
+        assert!(ok("v1.2.3"));
+        assert!(ok("my_value-1"));
+        assert!(ok("a"), "single alphanumeric");
+        // Must start/end alphanumeric; only the allowed punctuation; ≤63 chars.
+        for (v, want) in [
+            ("-bad", "begin and end"),
+            ("bad-", "begin and end"),
+            (".dotstart", "begin and end"),
+            ("has space", "alphanumerics"),
+            ("a/b", "alphanumerics"),
+        ] {
+            let r = op_valid_label_value(json!({ "value": v })).unwrap();
+            assert_eq!(r["valid"], json!(false), "{v} should be invalid");
+            assert!(
+                r["reason"].as_str().unwrap().contains(want),
+                "{v}: reason `{}` should mention `{want}`",
+                r["reason"]
+            );
+        }
+        // 63 is the max; 64 fails.
+        assert!(ok(&"a".repeat(63)));
+        let long = op_valid_label_value(json!({"value": "a".repeat(64)})).unwrap();
         assert_eq!(long["valid"], json!(false));
         assert!(long["reason"].as_str().unwrap().contains("63"));
     }
