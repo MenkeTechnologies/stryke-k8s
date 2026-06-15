@@ -902,11 +902,9 @@ fn set_values(s: &str) -> Vec<Value> {
 /// (`k=v`, `k==v`, `k!=v`), set-based (`k in (a,b)`, `k notin (a,b)`), and
 /// existence (`k`, `!k`). Each requirement is `{key, op, value?, values?}`
 /// where op ∈ Equal|NotEqual|In|NotIn|Exists|DoesNotExist. Pure.
-fn op_parse_selector(opts: Value) -> Result<Value> {
-    let sel = opts
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing selector"))?;
+/// Parse a label-selector string into its requirement objects (shared by
+/// `parse_selector` and `selector_matches`).
+fn parse_selector_reqs(sel: &str) -> Vec<Value> {
     let mut reqs = Vec::new();
     for raw in split_requirements(sel) {
         if let Some(idx) = raw.find(" notin ") {
@@ -925,7 +923,58 @@ fn op_parse_selector(opts: Value) -> Result<Value> {
             reqs.push(json!({"key": raw.trim(), "op": "Exists"}));
         }
     }
-    Ok(json!({"requirements": reqs}))
+    reqs
+}
+
+fn op_parse_selector(opts: Value) -> Result<Value> {
+    let sel = opts
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing selector"))?;
+    Ok(json!({"requirements": parse_selector_reqs(sel)}))
+}
+
+/// Evaluate whether a label map satisfies a label selector — the decision a
+/// controller makes about whether an object is selected. All requirements are
+/// ANDed. Per `Requirement.Matches` in apimachinery: `In`/`Equal` need the key
+/// present with its value in the set; `NotIn`/`NotEqual` match when the key is
+/// ABSENT or its value is outside the set; `Exists`/`DoesNotExist` test
+/// presence. An empty selector matches everything. opts: `labels` (object),
+/// `selector` (string). Returns `{matches, requirements}`. Pure.
+fn op_selector_matches(opts: Value) -> Result<Value> {
+    let labels = opts
+        .get("labels")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("missing labels (object)"))?;
+    let sel = opts
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing selector"))?;
+    let reqs = parse_selector_reqs(sel);
+    let value_of = |k: &str| labels.get(k).and_then(Value::as_str);
+    let in_set = |v: &str, req: &Value| {
+        req["values"]
+            .as_array()
+            .is_some_and(|vs| vs.iter().any(|x| x.as_str() == Some(v)))
+    };
+    let mut matches = true;
+    for r in &reqs {
+        let key = r["key"].as_str().unwrap_or("");
+        let ok = match r["op"].as_str().unwrap_or("") {
+            "Exists" => labels.contains_key(key),
+            "DoesNotExist" => !labels.contains_key(key),
+            "Equal" => value_of(key) == r["value"].as_str(),
+            "NotEqual" => value_of(key) != r["value"].as_str(),
+            "In" => value_of(key).is_some_and(|v| in_set(v, r)),
+            "NotIn" => value_of(key).is_none_or(|v| !in_set(v, r)),
+            _ => false,
+        };
+        if !ok {
+            matches = false;
+            break;
+        }
+    }
+    Ok(json!({"matches": matches, "requirements": reqs}))
 }
 
 /// Build a label-selector string from a `requirements` list — the inverse of
@@ -1258,6 +1307,11 @@ pub extern "C" fn k8s__parse_selector(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__build_selector(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_build_selector(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__selector_matches(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_selector_matches(opts) })
 }
 
 #[no_mangle]
@@ -1949,6 +2003,42 @@ mod tests {
         // Unknown op and missing values are rejected.
         assert!(op_build_selector(json!({"requirements": [{"key": "x", "op": "Bogus"}]})).is_err());
         assert!(op_build_selector(json!({"requirements": [{"key": "x", "op": "In"}]})).is_err());
+    }
+
+    #[test]
+    fn selector_matches_follows_apimachinery_semantics() {
+        let labels = json!({"app": "nginx", "tier": "frontend", "env": "prod"});
+        let m = |sel: &str| {
+            op_selector_matches(json!({"labels": labels, "selector": sel})).unwrap()["matches"]
+                .as_bool()
+                .unwrap()
+        };
+        // Equality / inequality.
+        assert!(m("app=nginx"), "Equal: matching value");
+        assert!(!m("app=apache"), "Equal: wrong value");
+        assert!(m("tier!=backend"), "NotEqual: present, different value");
+        assert!(!m("tier!=frontend"), "NotEqual: present, same value");
+        // Set-based.
+        assert!(m("env in (prod,staging)"), "In: value in set");
+        assert!(!m("env in (dev)"), "In: value not in set");
+        assert!(m("env notin (dev,test)"), "NotIn: value outside set");
+        assert!(!m("env notin (prod)"), "NotIn: value in set");
+        // Existence.
+        assert!(m("app"), "Exists: key present");
+        assert!(!m("missing"), "Exists: key absent");
+        assert!(m("!missing"), "DoesNotExist: key absent");
+        assert!(!m("!app"), "DoesNotExist: key present");
+        // Absent-key rule: NotIn / NotEqual MATCH when the key is missing.
+        assert!(m("missing!=x"), "NotEqual matches an absent key");
+        assert!(m("missing notin (a,b)"), "NotIn matches an absent key");
+        assert!(!m("missing in (a,b)"), "In does not match an absent key");
+        // Requirements are ANDed; an empty selector matches everything.
+        assert!(m("app=nginx,env in (prod)"), "all requirements satisfied");
+        assert!(
+            !m("app=nginx,env=dev"),
+            "one failing requirement fails the whole selector"
+        );
+        assert!(m(""), "empty selector selects all");
     }
 
     #[test]

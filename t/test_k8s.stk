@@ -122,6 +122,17 @@ assert_eq $sel, "app=nginx,tier!=frontend,env in (prod,staging),canary,!legacy",
 assert_eq scalar(@{ [ K8s::parse_selector($sel) ] }), 5, "build_selector → parse_selector round-trips"
 assert_dies fn { K8s::build_selector([ +{ key => "x", op => "Bogus" } ]) }, "build_selector: rejects unknown op"
 
+# selector_matches: evaluate a label map against a selector (apimachinery rules).
+val %pod = (app => "nginx", tier => "frontend", env => "prod")
+assert_ok  K8s::selector_matches(\%pod, "app=nginx,env in (prod,staging)"), "selector_matches: all requirements satisfied"
+assert_eq  K8s::selector_matches(\%pod, "app=nginx,env=dev"), 0,            "selector_matches: one failing requirement fails the selector"
+assert_ok  K8s::selector_matches(\%pod, "tier!=backend"),                   "selector_matches: NotEqual with a different value"
+assert_eq  K8s::selector_matches(\%pod, "tier!=frontend"), 0,              "selector_matches: NotEqual with the same value fails"
+# absent-key rule: NotIn / NotEqual match a missing label; In does not.
+assert_ok  K8s::selector_matches(\%pod, "missing notin (a,b)"),             "selector_matches: NotIn matches an absent key"
+assert_eq  K8s::selector_matches(\%pod, "missing in (a,b)"), 0,            "selector_matches: In does not match an absent key"
+assert_ok  K8s::selector_matches(\%pod, ""),                                "selector_matches: empty selector selects all"
+
 val $rr = K8s::parse_resource_ref("deployment/web")
 assert_eq $rr->{kind}, "deployment", "parse_resource_ref: kind"
 assert_eq $rr->{name}, "web",        "parse_resource_ref: name"

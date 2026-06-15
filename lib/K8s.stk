@@ -349,6 +349,16 @@ fn K8s::build_selector ($requirements) {
         k8s__build_selector(to_json({ requirements => $requirements })))->{selector}
 }
 
+## Does a label map (%labels hashref) satisfy a label $selector? All
+## requirements are ANDed (apimachinery semantics): In/Equal need the key
+## present with the value in set; NotIn/NotEqual match when the key is absent or
+## its value is outside the set; Exists/DoesNotExist test presence. An empty
+## selector matches everything. Returns true/false.
+fn K8s::selector_matches ($labels, $selector) {
+    K8s::_decode("selector_matches",
+        k8s__selector_matches(to_json({ labels => $labels, selector => $selector })))->{matches}
+}
+
 ## Parse a kubectl resource ref "kind/name" (or bare "kind") into a hashref
 ## { kind, name } (name undef when only a kind is given).
 fn K8s::parse_resource_ref ($ref) {
