@@ -395,6 +395,15 @@ fn K8s::parse_api_version ($api_version) {
     K8s::_decode("parse_api_version", k8s__parse_api_version(to_json({ api_version => $api_version })))
 }
 
+## Assemble an apiVersion from a $group and $version — the inverse of
+## parse_api_version. An empty/undef $group gives the bare core form ("v1"); a
+## non-empty $group gives "$group/$version" ("apps/v1"). $version is required and
+## neither part may contain "/". Returns a hashref { api_version, group, version,
+## core }.
+fn K8s::build_api_version ($group, $version) {
+    K8s::_decode("build_api_version", k8s__build_api_version(to_json({ group => $group, version => $version })))
+}
+
 ## Parse a resource quantity ("100Mi", "500m", "2Gi", "1.5", "1e3") into a
 ## hashref { quantity, number, suffix, value }. Binary suffixes (Ki/Mi/Gi/Ti/
 ## Pi/Ei) are powers of 1024; decimal suffixes (n/u/m/k/M/G/T/P/E) are powers of

@@ -1215,6 +1215,41 @@ fn op_parse_api_version(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Assemble a Kubernetes `apiVersion` from a group and version — the inverse of
+/// `parse_api_version`. An empty (or absent) group gives the bare core-group form
+/// (`v1`); a non-empty group gives `group/version` (`apps/v1`). The version is
+/// required, and neither part may contain a `/`. opts: `group` (optional),
+/// `version` (required). Returns `{api_version, group, version, core}`. Pure.
+fn op_build_api_version(opts: Value) -> Result<Value> {
+    let version = opts
+        .get("version")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("missing version"))?;
+    if version.contains('/') {
+        return Err(anyhow!("version must not contain `/`: {version}"));
+    }
+    let group = opts
+        .get("group")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if let Some(g) = group {
+        if g.contains('/') {
+            return Err(anyhow!("group must not contain `/`: {g}"));
+        }
+    }
+    let api_version = match group {
+        Some(g) => format!("{g}/{version}"),
+        None => version.to_string(),
+    };
+    Ok(json!({
+        "api_version": api_version,
+        "group": group.unwrap_or(""),
+        "version": version,
+        "core": group.is_none(),
+    }))
+}
+
 /// Multiplier for a Kubernetes resource-quantity suffix: binary (Ki…Ei, powers
 /// of 1024) and decimal (n…E, powers of 1000). `None` for an unknown suffix.
 fn quantity_multiplier(suffix: &str) -> Option<f64> {
@@ -1639,6 +1674,11 @@ pub extern "C" fn k8s__build_resource_ref(args: *const c_char) -> *const c_char 
 #[no_mangle]
 pub extern "C" fn k8s__parse_api_version(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_parse_api_version(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__build_api_version(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_build_api_version(opts) })
 }
 
 #[no_mangle]
@@ -2519,6 +2559,38 @@ mod tests {
         assert!(op_parse_api_version(json!({"api_version": "/v1"})).is_err());
         assert!(op_parse_api_version(json!({"api_version": "apps/"})).is_err());
         assert!(op_parse_api_version(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_api_version_inverts_parse_api_version() {
+        // Empty/absent group → the bare core form.
+        let core = op_build_api_version(json!({"version": "v1"})).unwrap();
+        assert_eq!(core["api_version"], json!("v1"));
+        assert_eq!(core["core"], json!(true));
+        assert_eq!(
+            op_build_api_version(json!({"group": "", "version": "v1"})).unwrap()["api_version"],
+            json!("v1"),
+            "an empty group is also the core form"
+        );
+        // A group gives group/version.
+        let apps = op_build_api_version(json!({"group": "apps", "version": "v1"})).unwrap();
+        assert_eq!(apps["api_version"], json!("apps/v1"));
+        assert_eq!(apps["core"], json!(false));
+        // Round-trips parse_api_version both ways.
+        for av in ["v1", "apps/v1", "networking.k8s.io/v1"] {
+            let p = op_parse_api_version(json!({ "api_version": av })).unwrap();
+            let rebuilt = op_build_api_version(json!({
+                "group": p["group"], "version": p["version"],
+            }))
+            .unwrap();
+            assert_eq!(rebuilt["api_version"], json!(av), "round-trip {av}");
+        }
+        // Errors: missing/empty version, and a `/` in either part.
+        assert!(op_build_api_version(json!({"group": "apps"})).is_err());
+        assert!(op_build_api_version(json!({"version": ""})).is_err());
+        assert!(op_build_api_version(json!({"version": "a/b"})).is_err());
+        assert!(op_build_api_version(json!({"group": "a/b", "version": "v1"})).is_err());
+        assert!(op_build_api_version(json!({})).is_err());
     }
 
     #[test]
