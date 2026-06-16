@@ -415,3 +415,13 @@ fn K8s::sum_quantities (@quantities) {
         k8s__sum_quantities(to_json({ quantities => \@quantities })))
 }
 
+## Scale a resource quantity by a scalar $factor — the multiply companion to
+## sum_quantities. A Deployment's total request is replicas × per-pod request,
+## so scale_quantity("256Mi", 3) → 768Mi. The result keeps the input's suffix by
+## default (2Gi×3 → 6Gi, 500m×2 → 1000m); pass $suffix to override the rendering
+## unit. Returns { quantity, number, suffix, value, factor }.
+fn K8s::scale_quantity ($quantity, $factor, $suffix = undef) {
+    K8s::_decode("scale_quantity",
+        k8s__scale_quantity(to_json({ quantity => $quantity, factor => $factor, suffix => $suffix })))
+}
+

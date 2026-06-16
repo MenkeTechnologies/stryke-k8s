@@ -194,4 +194,17 @@ assert_eq K8s::sum_quantities("500m", "0.5", "250m")->{value}, 1.25, "sum_quanti
 assert_dies fn { K8s::sum_quantities() }, "sum_quantities: rejects an empty list"
 assert_dies fn { K8s::sum_quantities("100Xi") }, "sum_quantities: rejects an unknown suffix"
 
+# scale_quantity: multiply a quantity by a scalar (replicas × per-pod request).
+val $scaled = K8s::scale_quantity("256Mi", 3)
+assert_eq $scaled->{quantity}, "768Mi", "scale_quantity: 256Mi×3=768Mi keeps the unit"
+assert_eq $scaled->{factor}, 3,         "scale_quantity: echoes the factor"
+assert_eq K8s::scale_quantity("2Gi", 3)->{quantity}, "6Gi",     "scale_quantity: 2Gi×3=6Gi"
+assert_eq K8s::scale_quantity("500m", 2)->{quantity}, "1000m",  "scale_quantity: 500m×2=1000m"
+assert_eq K8s::scale_quantity("2Gi", 0.5)->{quantity}, "1Gi",   "scale_quantity: fractional factor 2Gi×0.5=1Gi"
+assert_eq K8s::scale_quantity("1Gi", 2, "Mi")->{quantity}, "2048Mi", "scale_quantity: explicit suffix renders in Mi"
+# Cross-check against compare_quantity: 256Mi×4 == 1Gi.
+assert_eq K8s::compare_quantity(K8s::scale_quantity("256Mi", 4)->{quantity}, "1Gi")->{cmp}, 0,
+    "scale_quantity: 256Mi×4 equals 1Gi"
+assert_dies fn { K8s::scale_quantity("100Xi", 2) }, "scale_quantity: rejects an unknown suffix"
+
 test_run

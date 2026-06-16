@@ -1328,6 +1328,47 @@ fn op_sum_quantities(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Scale a Kubernetes resource quantity by a scalar `factor` — the multiply
+/// companion to `sum_quantities`'s add. A Deployment's total request is
+/// `replicas × per-pod request`, so `scale_quantity("256Mi", 3)` → `768Mi`. The
+/// input is parsed into base units (same suffix rules as `parse_quantity`),
+/// multiplied, and rendered back. By default the result keeps the INPUT's suffix
+/// (`2Gi` × 3 → `6Gi`, `500m` × 2 → `1000m`); an explicit `suffix` overrides the
+/// rendering unit. opts: `quantity`, `factor`, optional `suffix`. Returns
+/// `{quantity, number, suffix, value, factor}`. Pure.
+fn op_scale_quantity(opts: Value) -> Result<Value> {
+    let q = opts
+        .get("quantity")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing quantity"))?;
+    let factor = opts
+        .get("factor")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| anyhow!("missing factor (a number)"))?;
+    if !factor.is_finite() {
+        return Err(anyhow!("factor must be finite"));
+    }
+    let (_, in_suffix, value) = resolve_quantity(q)?;
+    let scaled = value * factor;
+    // Default to the input's own suffix so `2Gi`×3 → `6Gi`; an explicit
+    // `suffix` opt overrides the rendering unit.
+    let explicit = opts.get("suffix").and_then(Value::as_str).or({
+        if in_suffix.is_empty() {
+            None
+        } else {
+            Some(in_suffix)
+        }
+    });
+    let (quantity, number, suffix) = render_quantity(scaled, explicit)?;
+    Ok(json!({
+        "quantity": quantity,
+        "number": number,
+        "suffix": suffix,
+        "value": scaled,
+        "factor": factor,
+    }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1540,6 +1581,11 @@ pub extern "C" fn k8s__format_quantity(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__sum_quantities(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_sum_quantities(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__scale_quantity(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_scale_quantity(opts) })
 }
 
 #[cfg(test)]
@@ -2470,5 +2516,48 @@ mod tests {
         assert!(op_sum_quantities(json!({})).is_err());
         assert!(op_sum_quantities(json!({"quantities": ["100Xi"]})).is_err());
         assert!(op_sum_quantities(json!({"quantities": [100]})).is_err());
+    }
+
+    #[test]
+    fn scale_quantity_multiplies_and_keeps_the_input_suffix() {
+        // Deployment total = replicas × per-pod request, keeping the unit.
+        let r = op_scale_quantity(json!({"quantity": "256Mi", "factor": 3})).unwrap();
+        assert_eq!(r["quantity"], json!("768Mi"));
+        assert_eq!(r["value"].as_f64().unwrap(), 768.0 * 2f64.powi(20));
+        assert_eq!(r["factor"], json!(3.0));
+        // Binary unit preserved: 2Gi × 3 → 6Gi (not auto-recompacted away).
+        assert_eq!(
+            op_scale_quantity(json!({"quantity": "2Gi", "factor": 3})).unwrap()["quantity"],
+            json!("6Gi")
+        );
+        // Milli-CPU keeps its suffix: 500m × 2 → 1000m (== 1 core).
+        let c = op_scale_quantity(json!({"quantity": "500m", "factor": 2})).unwrap();
+        assert_eq!(c["quantity"], json!("1000m"));
+        assert_eq!(c["value"].as_f64().unwrap(), 1.0);
+        // A bare value stays bare: 1.5 × 2 → 3.
+        assert_eq!(
+            op_scale_quantity(json!({"quantity": "1.5", "factor": 2})).unwrap()["quantity"],
+            json!("3")
+        );
+        // Fractional factor: 2Gi × 0.5 → 1Gi.
+        assert_eq!(
+            op_scale_quantity(json!({"quantity": "2Gi", "factor": 0.5})).unwrap()["quantity"],
+            json!("1Gi")
+        );
+        // An explicit suffix overrides the rendering unit: 1Gi × 2 in Mi → 2048Mi.
+        assert_eq!(
+            op_scale_quantity(json!({"quantity": "1Gi", "factor": 2, "suffix": "Mi"})).unwrap()
+                ["quantity"],
+            json!("2048Mi")
+        );
+        // Scaling round-trips back through compare_quantity: 256Mi × 4 == 1Gi.
+        let q = op_scale_quantity(json!({"quantity": "256Mi", "factor": 4})).unwrap();
+        let cmp =
+            op_compare_quantity(json!({"a": q["quantity"].as_str().unwrap(), "b": "1Gi"})).unwrap();
+        assert_eq!(cmp["cmp"], json!(0));
+        // Errors: missing quantity, missing/non-finite factor, bad unit.
+        assert!(op_scale_quantity(json!({"factor": 2})).is_err());
+        assert!(op_scale_quantity(json!({"quantity": "2Gi"})).is_err());
+        assert!(op_scale_quantity(json!({"quantity": "100Xi", "factor": 2})).is_err());
     }
 }

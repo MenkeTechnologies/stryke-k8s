@@ -68,5 +68,6 @@ assert_ok exists &K8s::parse_quantity, "K8s::parse_quantity exists"
 assert_ok exists &K8s::compare_quantity, "K8s::compare_quantity exists"
 assert_ok exists &K8s::format_quantity, "K8s::format_quantity exists"
 assert_ok exists &K8s::sum_quantities, "K8s::sum_quantities exists"
+assert_ok exists &K8s::scale_quantity, "K8s::scale_quantity exists"
 
 test_run
