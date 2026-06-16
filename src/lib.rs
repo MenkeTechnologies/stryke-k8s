@@ -1087,6 +1087,49 @@ fn op_selector_matches(opts: Value) -> Result<Value> {
     Ok(json!({"matches": matches, "requirements": reqs}))
 }
 
+/// Whether an object's `fields` satisfy a FIELD selector — the field-selector
+/// counterpart of `selector_matches` (labels). Field selectors support only `=`,
+/// `==` (both equality) and `!=`; the selector is parsed with the same rules as
+/// `parse_field_selector`, then every requirement is ANDed: `field=value` needs
+/// the field equal to value, `field!=value` needs it different. A field absent
+/// from `fields` is treated as the empty string (how the apiserver compares
+/// unset fields), and an empty selector matches everything. opts: `fields`
+/// (object of field-path → string value), `selector` (or `field_selector`).
+/// Returns `{matches, requirements}`. Pure.
+fn op_field_selector_matches(opts: Value) -> Result<Value> {
+    let fields = opts
+        .get("fields")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("missing fields (object)"))?;
+    let sel = opts
+        .get("selector")
+        .or_else(|| opts.get("field_selector"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing selector"))?;
+    let parsed = op_parse_field_selector(json!({ "selector": sel }))?;
+    let reqs = parsed["requirements"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let value_of = |f: &str| fields.get(f).and_then(Value::as_str).unwrap_or("");
+    let mut matches = true;
+    for r in &reqs {
+        let field = r["field"].as_str().unwrap_or("");
+        let value = r["value"].as_str().unwrap_or("");
+        let actual = value_of(field);
+        let ok = match r["operator"].as_str().unwrap_or("=") {
+            "=" => actual == value,
+            "!=" => actual != value,
+            _ => false,
+        };
+        if !ok {
+            matches = false;
+            break;
+        }
+    }
+    Ok(json!({"matches": matches, "requirements": reqs}))
+}
+
 /// Build a label-selector string from a `requirements` list — the inverse of
 /// `parse_selector`. Each entry is `{key, op, value?|values?}` with op one of
 /// Equal/NotEqual/In/NotIn/Exists/DoesNotExist; entries are joined with `,`.
@@ -1759,6 +1802,11 @@ pub extern "C" fn k8s__build_field_selector(args: *const c_char) -> *const c_cha
 #[no_mangle]
 pub extern "C" fn k8s__selector_matches(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_selector_matches(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__field_selector_matches(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_field_selector_matches(opts) })
 }
 
 #[no_mangle]
@@ -2681,6 +2729,47 @@ mod tests {
             "one failing requirement fails the whole selector"
         );
         assert!(m(""), "empty selector selects all");
+    }
+
+    #[test]
+    fn field_selector_matches_evaluates_equality_only() {
+        let fields = json!({"status.phase": "Running", "spec.nodeName": "node1"});
+        let m = |sel: &str| {
+            op_field_selector_matches(json!({"fields": fields, "selector": sel})).unwrap()
+                ["matches"]
+                .as_bool()
+                .unwrap()
+        };
+        // Equality / inequality on present fields.
+        assert!(m("status.phase=Running"), "Equal: matching value");
+        assert!(!m("status.phase=Pending"), "Equal: wrong value");
+        assert!(m("status.phase!=Pending"), "NotEqual: different value");
+        assert!(!m("status.phase!=Running"), "NotEqual: same value");
+        // `==` is accepted as equality.
+        assert!(m("spec.nodeName==node1"), "== is equality");
+        // An absent field compares as the empty string.
+        assert!(!m("metadata.name=foo"), "absent field != a non-empty value");
+        assert!(
+            m("metadata.name!=foo"),
+            "absent field is != a non-empty value"
+        );
+        assert!(m("metadata.name="), "absent field equals the empty string");
+        // Requirements are ANDed; empty selector matches all.
+        assert!(
+            m("status.phase=Running,spec.nodeName=node1"),
+            "all requirements satisfied"
+        );
+        assert!(
+            !m("status.phase=Running,spec.nodeName=node2"),
+            "one failing requirement fails the selector"
+        );
+        assert!(m(""), "empty selector matches everything");
+        // Set-based operators are rejected (field selectors don't support them).
+        assert!(op_field_selector_matches(
+            json!({"fields": fields, "selector": "status.phase in (Running)"})
+        )
+        .is_err());
+        assert!(op_field_selector_matches(json!({"selector": "x=y"})).is_err());
     }
 
     #[test]

@@ -394,6 +394,16 @@ fn K8s::selector_matches ($labels, $selector) {
         k8s__selector_matches(to_json({ labels => $labels, selector => $selector })))->{matches}
 }
 
+## Does a field map (%fields hashref of field-path → value) satisfy a FIELD
+## $selector? The field-selector counterpart of selector_matches: only =, == and
+## != are supported, requirements are ANDed, a field absent from %fields compares
+## as the empty string, and an empty selector matches everything. Returns
+## true/false.
+fn K8s::field_selector_matches ($fields, $selector) {
+    K8s::_decode("field_selector_matches",
+        k8s__field_selector_matches(to_json({ fields => $fields, selector => $selector })))->{matches}
+}
+
 ## Parse a kubectl resource ref "kind/name" (or bare "kind") into a hashref
 ## { kind, name } (name undef when only a kind is given).
 fn K8s::parse_resource_ref ($ref) {

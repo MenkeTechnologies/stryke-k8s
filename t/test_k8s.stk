@@ -172,6 +172,16 @@ assert_ok  K8s::selector_matches(\%pod, "missing notin (a,b)"),             "sel
 assert_eq  K8s::selector_matches(\%pod, "missing in (a,b)"), 0,            "selector_matches: In does not match an absent key"
 assert_ok  K8s::selector_matches(\%pod, ""),                                "selector_matches: empty selector selects all"
 
+# field_selector_matches: evaluate a field map against a FIELD selector (=, ==, != only).
+val %obj = ("status.phase" => "Running", "spec.nodeName" => "node1")
+assert_ok  K8s::field_selector_matches(\%obj, "status.phase=Running"),       "field_selector_matches: equality on a present field"
+assert_eq  K8s::field_selector_matches(\%obj, "status.phase=Pending"), 0,    "field_selector_matches: wrong value fails"
+assert_ok  K8s::field_selector_matches(\%obj, "status.phase!=Pending"),      "field_selector_matches: inequality"
+assert_ok  K8s::field_selector_matches(\%obj, "spec.nodeName==node1"),       "field_selector_matches: == is equality"
+assert_ok  K8s::field_selector_matches(\%obj, "metadata.name="),             "field_selector_matches: absent field equals the empty string"
+assert_eq  K8s::field_selector_matches(\%obj, "status.phase=Running,spec.nodeName=node2"), 0, "field_selector_matches: requirements are ANDed"
+assert_dies fn { K8s::field_selector_matches(\%obj, "status.phase in (Running)") }, "field_selector_matches: rejects set-based operators"
+
 val $rr = K8s::parse_resource_ref("deployment/web")
 assert_eq $rr->{kind}, "deployment", "parse_resource_ref: kind"
 assert_eq $rr->{name}, "web",        "parse_resource_ref: name"
