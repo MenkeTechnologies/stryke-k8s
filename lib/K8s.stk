@@ -364,6 +364,16 @@ fn K8s::build_selector ($requirements) {
         k8s__build_selector(to_json({ requirements => $requirements })))->{selector}
 }
 
+## Parse a FIELD selector (status.phase=Running,metadata.name!=foo) into a list
+## of requirements — distinct from a label selector: field selectors support only
+## =, == (both equality) and !=, never set-based ops, and their keys are object
+## field paths. == is normalized to =. Returns a list of { field, operator, value }
+## where operator is = or !=.
+fn K8s::parse_field_selector ($selector) {
+    @{ K8s::_decode("parse_field_selector",
+        k8s__parse_field_selector(to_json({ selector => $selector })))->{requirements} }
+}
+
 ## Does a label map (%labels hashref) satisfy a label $selector? All
 ## requirements are ANDed (apimachinery semantics): In/Equal need the key
 ## present with the value in set; NotIn/NotEqual match when the key is absent or

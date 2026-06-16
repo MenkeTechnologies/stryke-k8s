@@ -1128,6 +1128,55 @@ fn op_build_selector(opts: Value) -> Result<Value> {
     Ok(json!({"selector": parts.join(",")}))
 }
 
+/// Parse a Kubernetes FIELD selector (`status.phase=Running,metadata.name!=foo`)
+/// into its requirements — distinct from a label selector: field selectors
+/// support only `=`, `==` (both equality) and `!=`, never the set-based operators
+/// (`in`/`notin`/exists), and their keys are object field paths. `==` is
+/// normalized to `=`; an empty string yields no requirements. opts: `selector`
+/// (or `field_selector`). Returns `{requirements: [{field, operator, value}]}`
+/// where `operator` is `=` or `!=`. Pure.
+fn op_parse_field_selector(opts: Value) -> Result<Value> {
+    let sel = opts
+        .get("selector")
+        .or_else(|| opts.get("field_selector"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing selector"))?
+        .trim();
+    if sel.is_empty() {
+        return Ok(json!({ "requirements": [] }));
+    }
+    let mut reqs = Vec::new();
+    for clause in sel.split(',') {
+        let c = clause.trim();
+        if c.is_empty() {
+            return Err(anyhow!("empty field selector clause"));
+        }
+        // Set-based operators belong to label selectors, not field selectors.
+        if c.starts_with('!') || c.contains(" in ") || c.contains(" notin ") {
+            return Err(anyhow!(
+                "field selectors support only =, ==, != (not set-based): `{c}`"
+            ));
+        }
+        let (field, operator, value) = if let Some(i) = c.find("!=") {
+            (&c[..i], "!=", &c[i + 2..])
+        } else if let Some(i) = c.find("==") {
+            (&c[..i], "=", &c[i + 2..])
+        } else if let Some(i) = c.find('=') {
+            (&c[..i], "=", &c[i + 1..])
+        } else {
+            return Err(anyhow!(
+                "field selector clause missing an operator (=, ==, !=): `{c}`"
+            ));
+        };
+        let field = field.trim();
+        if field.is_empty() {
+            return Err(anyhow!("field selector clause missing a field: `{c}`"));
+        }
+        reqs.push(json!({ "field": field, "operator": operator, "value": value.trim() }));
+    }
+    Ok(json!({ "requirements": reqs }))
+}
+
 /// Parse a kubectl resource reference `kind/name` (or bare `kind`) into
 /// `{kind, name}`. Pure.
 fn op_parse_resource_ref(opts: Value) -> Result<Value> {
@@ -1654,6 +1703,11 @@ pub extern "C" fn k8s__parse_selector(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__build_selector(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_build_selector(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__parse_field_selector(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_parse_field_selector(opts) })
 }
 
 #[no_mangle]
@@ -2453,6 +2507,55 @@ mod tests {
         // Unknown op and missing values are rejected.
         assert!(op_build_selector(json!({"requirements": [{"key": "x", "op": "Bogus"}]})).is_err());
         assert!(op_build_selector(json!({"requirements": [{"key": "x", "op": "In"}]})).is_err());
+    }
+
+    #[test]
+    fn parse_field_selector_handles_equality_and_inequality() {
+        let v = op_parse_field_selector(json!({
+            "selector": "status.phase!=Running,spec.restartPolicy=Always",
+        }))
+        .unwrap();
+        let reqs = v["requirements"].as_array().unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(
+            reqs[0],
+            json!({"field": "status.phase", "operator": "!=", "value": "Running"})
+        );
+        assert_eq!(
+            reqs[1],
+            json!({"field": "spec.restartPolicy", "operator": "=", "value": "Always"})
+        );
+        // `==` normalizes to `=`; an empty value is allowed.
+        let eq = op_parse_field_selector(json!({"selector": "metadata.name==foo,spec.nodeName="}))
+            .unwrap();
+        let r = eq["requirements"].as_array().unwrap();
+        assert_eq!(
+            r[0],
+            json!({"field": "metadata.name", "operator": "=", "value": "foo"})
+        );
+        assert_eq!(
+            r[1],
+            json!({"field": "spec.nodeName", "operator": "=", "value": ""})
+        );
+        // `field_selector` alias and an empty selector → no requirements.
+        assert_eq!(
+            op_parse_field_selector(json!({"field_selector": "metadata.namespace!=default"}))
+                .unwrap()["requirements"][0]["field"],
+            json!("metadata.namespace")
+        );
+        assert_eq!(
+            op_parse_field_selector(json!({"selector": ""})).unwrap()["requirements"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        // Set-based operators, a missing operator, and a missing field are rejected.
+        assert!(op_parse_field_selector(json!({"selector": "env in (prod,staging)"})).is_err());
+        assert!(op_parse_field_selector(json!({"selector": "!canary"})).is_err());
+        assert!(op_parse_field_selector(json!({"selector": "status.phase"})).is_err());
+        assert!(op_parse_field_selector(json!({"selector": "=Running"})).is_err());
+        assert!(op_parse_field_selector(json!({})).is_err());
     }
 
     #[test]
