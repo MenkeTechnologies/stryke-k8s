@@ -108,6 +108,16 @@ val $tl = K8s::valid_label_value("a" x 64)
 assert_eq $tl->{valid}, 0,                               "valid_label_value: over 63 chars fails"
 assert_match qr/63/, $tl->{reason},                      "valid_label_value: reason names the limit"
 
+# valid_label_key: label/annotation KEY rules (IsQualifiedName) — optional prefix.
+assert_ok K8s::valid_label_key("app")->{valid},                     "valid_label_key: bare name"
+val $lk = K8s::valid_label_key("app.kubernetes.io/name")
+assert_ok $lk->{valid},                                             "valid_label_key: prefixed key valid"
+assert_eq $lk->{prefix}, "app.kubernetes.io",                       "valid_label_key: prefix split out"
+assert_eq $lk->{name},   "name",                                    "valid_label_key: name split out"
+assert_eq K8s::valid_label_key("a/b/c")->{valid}, 0,               "valid_label_key: rejects two slashes"
+assert_eq K8s::valid_label_key("UPPER.PREFIX/name")->{valid}, 0,   "valid_label_key: prefix must be lowercase DNS subdomain"
+assert_eq K8s::valid_label_key("-bad")->{valid}, 0,                "valid_label_key: name must start alphanumeric"
+
 val @reqs = K8s::parse_selector("app=nginx,tier!=frontend,!canary")
 assert_eq scalar(@reqs), 3,            "parse_selector: three requirements"
 assert_eq $reqs[0]{key}, "app",        "parse_selector: equality key"

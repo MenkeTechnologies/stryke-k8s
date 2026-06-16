@@ -59,6 +59,7 @@ assert_ok exists &K8s::untaint, "K8s::untaint exists"
 
 assert_ok exists &K8s::valid_name, "K8s::valid_name exists"
 assert_ok exists &K8s::valid_label_value, "K8s::valid_label_value exists"
+assert_ok exists &K8s::valid_label_key, "K8s::valid_label_key exists"
 assert_ok exists &K8s::parse_selector, "K8s::parse_selector exists"
 assert_ok exists &K8s::build_selector, "K8s::build_selector exists"
 assert_ok exists &K8s::selector_matches, "K8s::selector_matches exists"

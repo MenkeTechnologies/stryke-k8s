@@ -1,6 +1,6 @@
 [package]
 name = "stryke-k8s"
-version = "0.8.0"
+version = "0.9.0"
 description = "Kubernetes client for stryke. Get / apply / delete / scale / logs against any kubeconfig-reachable cluster. cdylib loaded in-process — persistent kube::Client cache across calls."
 authors = ["MenkeTechnologies"]
 license = "MIT"
@@ -44,6 +44,7 @@ exports = [
     "k8s__taint",
     "k8s__valid_name",
     "k8s__valid_label_value",
+    "k8s__valid_label_key",
     "k8s__parse_selector",
     "k8s__build_selector",
     "k8s__selector_matches",

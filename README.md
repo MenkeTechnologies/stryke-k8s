@@ -254,6 +254,7 @@ K8s::annotate         $kind, $name, \%annotations, %opts → \%obj
 ```stryke
 K8s::valid_name($name, %opts)   → { name, mode, valid, reason }   # opts: mode => subdomain|label
 K8s::valid_label_value($value)  → { value, valid, reason }        # label value rules: empty ok, ≤63, alnum start/end, -_. + uppercase
+K8s::valid_label_key($key)      → { key, prefix, name, valid, reason }   # label/annotation key (IsQualifiedName): optional DNS-subdomain prefix + / + ≤63 name
 K8s::parse_selector($selector)  → @{ {key, op, value?, values?} }  # =, ==, !=, in, notin, exists
 K8s::build_selector($reqs)      → $selector                       # \@{key,op,value?|values?} → label-selector; inverse of parse_selector
 K8s::selector_matches(\%labels, $selector) → bool                 # does a label map satisfy the selector? (apimachinery AND semantics; absent key matches NotIn/NotEqual)
@@ -314,7 +315,7 @@ version/discovery, get/list, write paths (create / replace / apply / delete
 / scale / patch), rollouts (set_image / rollout_restart / rollout_status /
 label / annotate), node scheduling (cordon / uncordon / evict), events,
 metrics (top_pods / top_nodes), wait, snapshot logs, plus cluster-free
-helpers (valid_name / valid_label_value / parse_selector / build_selector / selector_matches / parse_resource_ref / parse_quantity / format_quantity). The
+helpers (valid_name / valid_label_value / valid_label_key / parse_selector / build_selector / selector_matches / parse_resource_ref / parse_quantity / format_quantity). The
 authoritative list is `[ffi].exports` in `stryke.toml`.
 
 **Persistent state:**

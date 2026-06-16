@@ -341,6 +341,14 @@ fn K8s::valid_label_value ($value) {
     K8s::_decode("valid_label_value", k8s__valid_label_value(to_json({ value => $value })))
 }
 
+## Validate a label/annotation KEY (companion to valid_label_value). Per
+## apimachinery IsQualifiedName: an optional DNS-1123 subdomain prefix + "/" +
+## a 1-63 char name part (alphanumerics + - _ ., start/end alphanumeric).
+## Returns { key, prefix, name, valid, reason }.
+fn K8s::valid_label_key ($key) {
+    K8s::_decode("valid_label_key", k8s__valid_label_key(to_json({ key => $key })))
+}
+
 ## Parse a label selector into a list of requirements. Supports equality
 ## (k=v, k==v, k!=v), set-based (k in (a,b), k notin (a,b)), and existence
 ## (k, !k). Returns a list of { key, op, value?, values? }.

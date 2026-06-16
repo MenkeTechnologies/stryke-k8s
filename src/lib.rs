@@ -885,6 +885,87 @@ fn op_valid_label_value(opts: Value) -> Result<Value> {
     Ok(json!({"value": value, "valid": reason.is_none(), "reason": reason}))
 }
 
+/// A qualified-name *name part* per apimachinery: 1-63 chars,
+/// `[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?` (start/end alphanumeric).
+fn qualified_name_part_ok(s: &str) -> bool {
+    if s.is_empty() || s.len() > 63 {
+        return false;
+    }
+    let b = s.as_bytes();
+    if !b[0].is_ascii_alphanumeric() || !b[b.len() - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    s.bytes()
+        .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.')
+}
+
+/// A DNS-1123 subdomain per apimachinery: ≤253 chars, a `.`-joined series of
+/// DNS-1123 labels (each 1-63 chars, lowercase alphanumeric or `-`, start/end
+/// alphanumeric). Used to validate a label key's optional prefix.
+fn dns1123_subdomain_ok(s: &str) -> bool {
+    if s.is_empty() || s.len() > 253 {
+        return false;
+    }
+    s.split('.').all(|label| {
+        let b = label.as_bytes();
+        !label.is_empty()
+            && label.len() <= 63
+            && b[0].is_ascii_alphanumeric()
+            && b[b.len() - 1].is_ascii_alphanumeric()
+            && label
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    })
+}
+
+/// Validate a Kubernetes label/annotation *key* — the companion to
+/// `valid_label_value`. Per apimachinery's `IsQualifiedName`: an optional DNS-1123
+/// subdomain prefix and a `/`, then a name part (1-63 chars, alphanumerics plus
+/// `-_.`, starting and ending alphanumeric). At most one `/` is allowed and the
+/// prefix, when present, must be non-empty. Returns `{key, prefix, name, valid,
+/// reason}`. Pure.
+fn op_valid_label_key(opts: Value) -> Result<Value> {
+    let key = opts
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing key"))?;
+    let slashes = key.matches('/').count();
+    let (prefix, name): (Option<&str>, &str) = if slashes == 0 {
+        (None, key)
+    } else {
+        let (p, n) = key.split_once('/').unwrap();
+        (Some(p), n)
+    };
+    let reason: Option<String> = if key.is_empty() {
+        Some("must not be empty".into())
+    } else if slashes > 1 {
+        Some("at most one '/' is allowed (optional prefix + name)".into())
+    } else if let Some(p) = prefix.filter(|_| slashes == 1) {
+        if p.is_empty() {
+            Some("prefix before '/' must not be empty".into())
+        } else if !dns1123_subdomain_ok(p) {
+            Some("prefix must be a DNS-1123 subdomain (≤253 chars)".into())
+        } else if !qualified_name_part_ok(name) {
+            Some(
+                "name part must be 1-63 chars of alphanumerics/-_. (start/end alphanumeric)".into(),
+            )
+        } else {
+            None
+        }
+    } else if !qualified_name_part_ok(name) {
+        Some("must be 1-63 chars of alphanumerics/-_. (start/end alphanumeric)".into())
+    } else {
+        None
+    };
+    Ok(json!({
+        "key": key,
+        "prefix": prefix,
+        "name": name,
+        "valid": reason.is_none(),
+        "reason": reason,
+    }))
+}
+
 /// Split a label selector on top-level commas, ignoring commas inside the
 /// `(...)` of a set-based requirement.
 fn split_requirements(s: &str) -> Vec<String> {
@@ -1331,6 +1412,11 @@ pub extern "C" fn k8s__valid_name(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__valid_label_value(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_valid_label_value(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__valid_label_key(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_valid_label_key(opts) })
 }
 
 #[no_mangle]
@@ -2007,6 +2093,43 @@ mod tests {
         let long = op_valid_label_value(json!({"value": "a".repeat(64)})).unwrap();
         assert_eq!(long["valid"], json!(false));
         assert!(long["reason"].as_str().unwrap().contains("63"));
+    }
+
+    #[test]
+    fn valid_label_key_follows_is_qualified_name() {
+        let chk = |k: &str| op_valid_label_key(json!({ "key": k })).unwrap();
+        // Bare name part.
+        assert_eq!(chk("app")["valid"], json!(true));
+        assert_eq!(chk("app.kubernetes.io_name")["valid"], json!(true));
+        // Prefixed key: DNS subdomain prefix + name, split is reported.
+        let pfx = chk("app.kubernetes.io/name");
+        assert_eq!(pfx["valid"], json!(true));
+        assert_eq!(pfx["prefix"], json!("app.kubernetes.io"));
+        assert_eq!(pfx["name"], json!("name"));
+        // Uppercase and `_` are allowed in the name part (unlike resource names).
+        assert_eq!(chk("MyKey_1")["valid"], json!(true));
+        // Invalids.
+        for (k, want) in [
+            ("", "empty"),
+            ("-bad", "start/end"),
+            ("bad-", "start/end"),
+            ("a/b/c", "one '/'"),
+            ("/name", "prefix"),
+            ("UPPER.PREFIX/name", "DNS-1123"),
+            (&format!("{}/name", "a".repeat(254)), "DNS-1123"),
+        ] {
+            let r = op_valid_label_key(json!({ "key": k }));
+            let r = r.unwrap();
+            assert_eq!(r["valid"], json!(false), "`{k}` should be invalid");
+            assert!(
+                r["reason"].as_str().unwrap().contains(want),
+                "`{k}`: reason `{}` should mention `{want}`",
+                r["reason"]
+            );
+        }
+        // 63-char name part is the max.
+        assert_eq!(chk(&"a".repeat(63))["valid"], json!(true));
+        assert_eq!(chk(&"a".repeat(64))["valid"], json!(false));
     }
 
     #[test]
