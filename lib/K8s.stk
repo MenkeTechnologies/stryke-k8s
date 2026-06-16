@@ -406,3 +406,12 @@ fn K8s::format_quantity ($value, $suffix = undef) {
         k8s__format_quantity(to_json({ value => $value, suffix => $suffix })))
 }
 
+## Sum a list of resource quantities (@quantities, strings) into one base-unit
+## total — e.g. the memory requests of every container in a pod. Each is parsed
+## with the parse_quantity suffix rules; the total is also rendered compactly.
+## Returns { count, value, quantity }.
+fn K8s::sum_quantities (@quantities) {
+    K8s::_decode("sum_quantities",
+        k8s__sum_quantities(to_json({ quantities => \@quantities })))
+}
+

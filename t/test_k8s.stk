@@ -185,4 +185,13 @@ assert_eq K8s::format_quantity(100)->{quantity},            "100",   "format_qua
 assert_eq K8s::parse_quantity(K8s::format_quantity(2147483648)->{quantity})->{value}, 2147483648, "format_quantity → parse_quantity round-trips 2Gi"
 assert_dies fn { K8s::format_quantity(1, "Xi") }, "format_quantity: rejects unknown suffix"
 
+# sum_quantities: total a list of quantities across units.
+val $sum = K8s::sum_quantities("100Mi", "256Mi", "128Mi")
+assert_eq $sum->{count}, 3,          "sum_quantities: counts the inputs"
+assert_eq $sum->{quantity}, "484Mi", "sum_quantities: 484Mi total rendered compactly"
+assert_eq K8s::sum_quantities("1Gi", "1024Mi")->{quantity}, "2Gi", "sum_quantities: cross-unit 1Gi+1024Mi=2Gi"
+assert_eq K8s::sum_quantities("500m", "0.5", "250m")->{value}, 1.25, "sum_quantities: CPU cores total"
+assert_dies fn { K8s::sum_quantities() }, "sum_quantities: rejects an empty list"
+assert_dies fn { K8s::sum_quantities("100Xi") }, "sum_quantities: rejects an unknown suffix"
+
 test_run

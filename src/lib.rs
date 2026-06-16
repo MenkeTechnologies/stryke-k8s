@@ -1254,12 +1254,12 @@ fn op_compare_quantity(opts: Value) -> Result<Value> {
 /// suffix's multiplier (`104857600, "Mi"` → `100Mi`). Without one, the largest
 /// binary suffix that divides the value exactly is chosen (`104857600` →
 /// `100Mi`, `100` → `100`). Returns `{quantity, number, suffix, value}`. Pure.
-fn op_format_quantity(opts: Value) -> Result<Value> {
-    let value = opts
-        .get("value")
-        .and_then(Value::as_f64)
-        .ok_or_else(|| anyhow!("missing value"))?;
-    let suffix = match opts.get("suffix").and_then(Value::as_str) {
+/// Render a base-unit `value` as a k8s quantity string, returning
+/// `(quantity, number, suffix)`. With an explicit suffix the value is divided by
+/// that suffix's multiplier; without one the largest binary suffix that divides
+/// the value exactly is chosen. Shared by `format_quantity` and `sum_quantities`.
+fn render_quantity(value: f64, explicit_suffix: Option<&str>) -> Result<(String, f64, String)> {
+    let suffix = match explicit_suffix {
         Some(s) => s.to_string(),
         None => BINARY_SUFFIXES
             .iter()
@@ -1278,11 +1278,53 @@ fn op_format_quantity(opts: Value) -> Result<Value> {
     } else {
         format!("{number}")
     };
+    Ok((format!("{num_str}{suffix}"), number, suffix))
+}
+
+fn op_format_quantity(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let (quantity, number, suffix) =
+        render_quantity(value, opts.get("suffix").and_then(Value::as_str))?;
     Ok(json!({
-        "quantity": format!("{num_str}{suffix}"),
+        "quantity": quantity,
         "number": number,
         "suffix": suffix,
         "value": value,
+    }))
+}
+
+/// Sum a list of Kubernetes resource quantities into one base-unit total — e.g.
+/// adding the memory requests of every container in a pod, or the CPU limits
+/// across a deployment. Each entry is parsed with the same suffix rules as
+/// `parse_quantity` (binary Ki…Ei, decimal n…E) and summed in base units; the
+/// total is also rendered back as a compact quantity string (largest binary
+/// suffix that divides it exactly, like `format_quantity`). opts: `quantities`
+/// (a non-empty array of quantity strings). Returns `{count, value, quantity}`.
+/// Pure.
+fn op_sum_quantities(opts: Value) -> Result<Value> {
+    let arr = opts
+        .get("quantities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing quantities (array of quantity strings)"))?;
+    if arr.is_empty() {
+        return Err(anyhow!("quantities is empty"));
+    }
+    let mut total = 0.0f64;
+    for q in arr {
+        let s = q
+            .as_str()
+            .ok_or_else(|| anyhow!("quantity must be a string"))?;
+        let (_, _, v) = resolve_quantity(s)?;
+        total += v;
+    }
+    let (quantity, _, _) = render_quantity(total, None)?;
+    Ok(json!({
+        "count": arr.len(),
+        "value": total,
+        "quantity": quantity,
     }))
 }
 
@@ -1493,6 +1535,11 @@ pub extern "C" fn k8s__compare_quantity(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__format_quantity(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_format_quantity(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__sum_quantities(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_sum_quantities(opts) })
 }
 
 #[cfg(test)]
@@ -2390,5 +2437,38 @@ mod tests {
         }
         assert!(op_format_quantity(json!({"value": 1, "suffix": "Xi"})).is_err());
         assert!(op_format_quantity(json!({})).is_err());
+    }
+
+    #[test]
+    fn sum_quantities_totals_across_units() {
+        // Memory requests of three containers, mixed binary/bare units.
+        let r = op_sum_quantities(json!({"quantities": ["100Mi", "256Mi", "128Mi"]})).unwrap();
+        assert_eq!(r["count"], json!(3));
+        // 484Mi in bytes, rendered back compactly.
+        assert_eq!(r["value"].as_f64().unwrap(), 484.0 * 2f64.powi(20));
+        assert_eq!(r["quantity"], json!("484Mi"));
+        // Cross-unit: 1Gi + 1024Mi == 2Gi.
+        let g = op_sum_quantities(json!({"quantities": ["1Gi", "1024Mi"]})).unwrap();
+        assert_eq!(g["quantity"], json!("2Gi"));
+        // CPU: 500m + 0.5 + 250m == 1.25 cores (no binary divisor → bare).
+        let c = op_sum_quantities(json!({"quantities": ["500m", "0.5", "250m"]})).unwrap();
+        assert_eq!(c["value"].as_f64().unwrap(), 1.25);
+        assert_eq!(c["quantity"], json!("1.25"));
+        // The total round-trips through parse_quantity.
+        let back = op_parse_quantity(json!({"quantity": r["quantity"].as_str().unwrap()})).unwrap();
+        assert_eq!(
+            back["value"].as_f64().unwrap(),
+            r["value"].as_f64().unwrap()
+        );
+        // Single element sums to itself.
+        assert_eq!(
+            op_sum_quantities(json!({"quantities": ["2Gi"]})).unwrap()["quantity"],
+            json!("2Gi")
+        );
+        // Errors: empty list, missing key, bad unit, non-string element.
+        assert!(op_sum_quantities(json!({"quantities": []})).is_err());
+        assert!(op_sum_quantities(json!({})).is_err());
+        assert!(op_sum_quantities(json!({"quantities": ["100Xi"]})).is_err());
+        assert!(op_sum_quantities(json!({"quantities": [100]})).is_err());
     }
 }
