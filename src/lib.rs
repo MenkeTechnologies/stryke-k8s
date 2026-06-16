@@ -1177,6 +1177,47 @@ fn op_parse_field_selector(opts: Value) -> Result<Value> {
     Ok(json!({ "requirements": reqs }))
 }
 
+/// Assemble a Kubernetes FIELD selector string from requirements — the inverse
+/// of `parse_field_selector`, and the field-selector counterpart of
+/// `build_selector` (labels). Each requirement is `{field, operator, value}`;
+/// `operator` defaults to `=` and only `=`, `==` (normalized to `=`) and `!=`
+/// are accepted — the set-based label operators are rejected, since field
+/// selectors don't support them. A `field` may not be empty or contain a `,` or
+/// `=` (which would make the joined selector unparseable). Clauses join with `,`.
+/// opts: `requirements` (array). Returns `{selector}`. Pure.
+fn op_build_field_selector(opts: Value) -> Result<Value> {
+    let reqs = opts
+        .get("requirements")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing requirements (array)"))?;
+    let mut parts = Vec::new();
+    for r in reqs {
+        let field = r
+            .get("field")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("requirement missing field"))?;
+        if field.is_empty() {
+            return Err(anyhow!("requirement has an empty field"));
+        }
+        if field.contains(',') || field.contains('=') {
+            return Err(anyhow!("field `{field}` may not contain `,` or `=`"));
+        }
+        let op = r.get("operator").and_then(Value::as_str).unwrap_or("=");
+        let value = r.get("value").and_then(Value::as_str).unwrap_or("");
+        let part = match op {
+            "=" | "==" => format!("{field}={value}"),
+            "!=" => format!("{field}!={value}"),
+            other => {
+                return Err(anyhow!(
+                    "field selectors support only =, ==, != (not `{other}`)"
+                ))
+            }
+        };
+        parts.push(part);
+    }
+    Ok(json!({ "selector": parts.join(",") }))
+}
+
 /// Parse a kubectl resource reference `kind/name` (or bare `kind`) into
 /// `{kind, name}`. Pure.
 fn op_parse_resource_ref(opts: Value) -> Result<Value> {
@@ -1708,6 +1749,11 @@ pub extern "C" fn k8s__build_selector(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__parse_field_selector(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_parse_field_selector(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__build_field_selector(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_build_field_selector(opts) })
 }
 
 #[no_mangle]
@@ -2556,6 +2602,49 @@ mod tests {
         assert!(op_parse_field_selector(json!({"selector": "status.phase"})).is_err());
         assert!(op_parse_field_selector(json!({"selector": "=Running"})).is_err());
         assert!(op_parse_field_selector(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_field_selector_inverts_parse_field_selector() {
+        let sel = "status.phase!=Running,spec.restartPolicy=Always";
+        let parsed = op_parse_field_selector(json!({ "selector": sel })).unwrap();
+        // Round-trips parse_field_selector exactly.
+        let built = op_build_field_selector(json!({
+            "requirements": parsed["requirements"],
+        }))
+        .unwrap();
+        assert_eq!(
+            built["selector"],
+            json!(sel),
+            "round-trips parse_field_selector"
+        );
+        // operator defaults to `=`; `==` normalizes to `=`; empty value is fine.
+        let b = op_build_field_selector(json!({
+            "requirements": [
+                {"field": "metadata.name"},
+                {"field": "spec.nodeName", "operator": "==", "value": "node1"},
+                {"field": "spec.host", "operator": "=", "value": ""},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(
+            b["selector"],
+            json!("metadata.name=,spec.nodeName=node1,spec.host=")
+        );
+        // Set-based ops, an empty field, and a structurally unsafe field are rejected.
+        assert!(op_build_field_selector(
+            json!({"requirements": [{"field": "env", "operator": "in", "value": "prod"}]})
+        )
+        .is_err());
+        assert!(
+            op_build_field_selector(json!({"requirements": [{"field": "", "value": "x"}]}))
+                .is_err()
+        );
+        assert!(
+            op_build_field_selector(json!({"requirements": [{"field": "a,b", "value": "x"}]}))
+                .is_err()
+        );
+        assert!(op_build_field_selector(json!({})).is_err());
     }
 
     #[test]

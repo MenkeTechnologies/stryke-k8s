@@ -154,6 +154,13 @@ assert_eq [ K8s::parse_field_selector("metadata.name==foo") ]->[0]{operator}, "=
 assert_dies fn { K8s::parse_field_selector("env in (prod,staging)") }, "parse_field_selector: rejects set-based operators"
 assert_dies fn { K8s::parse_field_selector("status.phase") },          "parse_field_selector: rejects a clause with no operator"
 
+# build_field_selector: inverse of parse_field_selector, field-selector counterpart of build_selector.
+val $fsel = "status.phase!=Running,spec.restartPolicy=Always"
+assert_eq K8s::build_field_selector([ K8s::parse_field_selector($fsel) ]), $fsel, "build_field_selector: round-trips parse_field_selector"
+assert_eq K8s::build_field_selector([ +{ field => "metadata.name" }, +{ field => "spec.nodeName", operator => "==", value => "node1" } ]), "metadata.name=,spec.nodeName=node1", "build_field_selector: operator defaults to =, == normalizes to ="
+assert_dies fn { K8s::build_field_selector([ +{ field => "env", operator => "in", value => "prod" } ]) }, "build_field_selector: rejects set-based operators"
+assert_dies fn { K8s::build_field_selector([ +{ field => "a,b", value => "x" } ]) },                      "build_field_selector: rejects a field with a comma"
+
 # selector_matches: evaluate a label map against a selector (apimachinery rules).
 val %pod = (app => "nginx", tier => "frontend", env => "prod")
 assert_ok  K8s::selector_matches(\%pod, "app=nginx,env in (prod,staging)"), "selector_matches: all requirements satisfied"
