@@ -1177,6 +1177,44 @@ fn op_build_resource_ref(opts: Value) -> Result<Value> {
     Ok(json!({"ref": r, "kind": kind, "name": name}))
 }
 
+/// Parse a Kubernetes `apiVersion` into its group and version. A bare version
+/// like `v1` is the core group (`group` empty, `core` true); `group/version` like
+/// `apps/v1` or `networking.k8s.io/v1` splits on the single `/`. The version
+/// segment is required, an empty group before a `/` is rejected, and a value with
+/// more than one `/` is invalid. opts: `api_version` (or `value`, required).
+/// Returns `{api_version, group, version, core}`. Pure.
+fn op_parse_api_version(opts: Value) -> Result<Value> {
+    let av = opts
+        .get("api_version")
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing api_version"))?;
+    if av.is_empty() {
+        return Err(anyhow!("apiVersion must not be empty"));
+    }
+    let (group, version) = match av.split('/').collect::<Vec<_>>().as_slice() {
+        [v] => ("", *v),
+        [g, v] => (*g, *v),
+        _ => {
+            return Err(anyhow!(
+                "invalid apiVersion `{av}` (want version or group/version)"
+            ))
+        }
+    };
+    if version.is_empty() {
+        return Err(anyhow!("apiVersion `{av}` has an empty version"));
+    }
+    if av.contains('/') && group.is_empty() {
+        return Err(anyhow!("apiVersion `{av}` has an empty group"));
+    }
+    Ok(json!({
+        "api_version": av,
+        "group": group,
+        "version": version,
+        "core": group.is_empty(),
+    }))
+}
+
 /// Multiplier for a Kubernetes resource-quantity suffix: binary (Ki…Ei, powers
 /// of 1024) and decimal (n…E, powers of 1000). `None` for an unknown suffix.
 fn quantity_multiplier(suffix: &str) -> Option<f64> {
@@ -1596,6 +1634,11 @@ pub extern "C" fn k8s__parse_resource_ref(args: *const c_char) -> *const c_char 
 #[no_mangle]
 pub extern "C" fn k8s__build_resource_ref(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_build_resource_ref(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__parse_api_version(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_parse_api_version(opts) })
 }
 
 #[no_mangle]
@@ -2447,6 +2490,35 @@ mod tests {
         assert!(op_build_resource_ref(json!({"kind": ""})).is_err());
         assert!(op_build_resource_ref(json!({"kind": "a/b"})).is_err());
         assert!(op_build_resource_ref(json!({"kind": "pod", "name": "a/b"})).is_err());
+    }
+
+    #[test]
+    fn parse_api_version_splits_group_and_version() {
+        // Bare version → core group.
+        let core = op_parse_api_version(json!({"api_version": "v1"})).unwrap();
+        assert_eq!(core["group"], json!(""));
+        assert_eq!(core["version"], json!("v1"));
+        assert_eq!(core["core"], json!(true));
+        // group/version forms.
+        let apps = op_parse_api_version(json!({"api_version": "apps/v1"})).unwrap();
+        assert_eq!(apps["group"], json!("apps"));
+        assert_eq!(apps["version"], json!("v1"));
+        assert_eq!(apps["core"], json!(false));
+        // A dotted group keeps its dots.
+        let net = op_parse_api_version(json!({"api_version": "networking.k8s.io/v1"})).unwrap();
+        assert_eq!(net["group"], json!("networking.k8s.io"));
+        assert_eq!(net["version"], json!("v1"));
+        // `value` alias.
+        assert_eq!(
+            op_parse_api_version(json!({"value": "batch/v1"})).unwrap()["group"],
+            json!("batch")
+        );
+        // Errors: empty, more than one `/`, empty group or version.
+        assert!(op_parse_api_version(json!({"api_version": ""})).is_err());
+        assert!(op_parse_api_version(json!({"api_version": "a/b/c"})).is_err());
+        assert!(op_parse_api_version(json!({"api_version": "/v1"})).is_err());
+        assert!(op_parse_api_version(json!({"api_version": "apps/"})).is_err());
+        assert!(op_parse_api_version(json!({})).is_err());
     }
 
     #[test]

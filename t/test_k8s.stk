@@ -166,6 +166,20 @@ assert_eq K8s::build_resource_ref($prr->{kind}, $prr->{name})->{ref}, "deploymen
 assert_dies fn { K8s::build_resource_ref("") }, "build_resource_ref: rejects an empty kind"
 assert_dies fn { K8s::build_resource_ref("pod", "a/b") }, "build_resource_ref: rejects a slash in the name"
 
+# parse_api_version: split an apiVersion into group + version.
+val $core = K8s::parse_api_version("v1")
+assert_eq $core->{group},   "",   "parse_api_version: bare v1 has the empty (core) group"
+assert_eq $core->{version}, "v1", "parse_api_version: bare v1 version"
+assert_eq $core->{core},    1,    "parse_api_version: bare v1 is the core group"
+val $apps = K8s::parse_api_version("apps/v1")
+assert_eq $apps->{group},   "apps", "parse_api_version: group of apps/v1"
+assert_eq $apps->{version}, "v1",   "parse_api_version: version of apps/v1"
+assert_eq $apps->{core},    0,      "parse_api_version: apps/v1 is not core"
+assert_eq K8s::parse_api_version("networking.k8s.io/v1")->{group}, "networking.k8s.io", "parse_api_version: dotted group kept"
+assert_dies fn { K8s::parse_api_version("a/b/c") }, "parse_api_version: rejects more than one slash"
+assert_dies fn { K8s::parse_api_version("apps/") }, "parse_api_version: rejects an empty version"
+assert_dies fn { K8s::parse_api_version("/v1") },   "parse_api_version: rejects an empty group"
+
 # parse_quantity: binary memory, milli-CPU, decimal SI, bare/exponent numbers.
 val $mem = K8s::parse_quantity("100Mi")
 assert_eq $mem->{value},  104857600, "parse_quantity: 100Mi = 100*1024^2 bytes"
