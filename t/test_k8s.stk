@@ -158,6 +158,14 @@ val $rr = K8s::parse_resource_ref("deployment/web")
 assert_eq $rr->{kind}, "deployment", "parse_resource_ref: kind"
 assert_eq $rr->{name}, "web",        "parse_resource_ref: name"
 
+# build_resource_ref: inverse of parse_resource_ref.
+assert_eq K8s::build_resource_ref("deployment", "web")->{ref}, "deployment/web", "build_resource_ref: kind/name"
+assert_eq K8s::build_resource_ref("pods")->{ref}, "pods", "build_resource_ref: bare kind"
+val $prr = K8s::parse_resource_ref("deployment/web")
+assert_eq K8s::build_resource_ref($prr->{kind}, $prr->{name})->{ref}, "deployment/web", "build_resource_ref: round-trips parse_resource_ref"
+assert_dies fn { K8s::build_resource_ref("") }, "build_resource_ref: rejects an empty kind"
+assert_dies fn { K8s::build_resource_ref("pod", "a/b") }, "build_resource_ref: rejects a slash in the name"
+
 # parse_quantity: binary memory, milli-CPU, decimal SI, bare/exponent numbers.
 val $mem = K8s::parse_quantity("100Mi")
 assert_eq $mem->{value},  104857600, "parse_quantity: 100Mi = 100*1024^2 bytes"

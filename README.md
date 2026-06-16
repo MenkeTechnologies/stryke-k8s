@@ -259,6 +259,7 @@ K8s::parse_selector($selector)  → @{ {key, op, value?, values?} }  # =, ==, !=
 K8s::build_selector($reqs)      → $selector                       # \@{key,op,value?|values?} → label-selector; inverse of parse_selector
 K8s::selector_matches(\%labels, $selector) → bool                 # does a label map satisfy the selector? (apimachinery AND semantics; absent key matches NotIn/NotEqual)
 K8s::parse_resource_ref($ref)   → { kind, name }                  # kind/name
+K8s::build_resource_ref($kind, $name?) → { ref, kind, name }      # inverse: deployment + web → deployment/web; bare kind when no name
 K8s::parse_quantity($qty)       → { quantity, number, suffix, value }  # 100Mi→bytes, 500m→0.5 cores
 K8s::format_quantity($value, $suffix?) → { quantity, number, suffix, value }  # bytes→100Mi; inverse of parse_quantity
 K8s::compare_quantity($a, $b)   → { a, b, a_value, b_value, cmp }  # order quantities across units (1Gi vs 1024Mi); cmp -1/0/1
@@ -318,7 +319,7 @@ version/discovery, get/list, write paths (create / replace / apply / delete
 / scale / patch), rollouts (set_image / rollout_restart / rollout_status /
 label / annotate), node scheduling (cordon / uncordon / evict), events,
 metrics (top_pods / top_nodes), wait, snapshot logs, plus cluster-free
-helpers (valid_name / valid_label_value / valid_label_key / parse_selector / build_selector / selector_matches / parse_resource_ref / parse_quantity / format_quantity / compare_quantity / sum_quantities). The
+helpers (valid_name / valid_label_value / valid_label_key / parse_selector / build_selector / selector_matches / parse_resource_ref / build_resource_ref / parse_quantity / format_quantity / compare_quantity / sum_quantities / scale_quantity). The
 authoritative list is `[ffi].exports` in `stryke.toml`.
 
 **Persistent state:**

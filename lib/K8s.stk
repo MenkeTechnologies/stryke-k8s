@@ -380,6 +380,13 @@ fn K8s::parse_resource_ref ($ref) {
     K8s::_decode("parse_resource_ref", k8s__parse_resource_ref(to_json({ ref => $ref })))
 }
 
+## Assemble a "kind/name" resource ref from parts — inverse of parse_resource_ref.
+## With $name emits "kind/name" (deployment/nginx); without it the bare "kind".
+## Neither part may contain a "/". Returns a hashref { ref, kind, name }.
+fn K8s::build_resource_ref ($kind, $name = undef) {
+    K8s::_decode("build_resource_ref", k8s__build_resource_ref(to_json({ kind => $kind, name => $name })))
+}
+
 ## Parse a resource quantity ("100Mi", "500m", "2Gi", "1.5", "1e3") into a
 ## hashref { quantity, number, suffix, value }. Binary suffixes (Ki/Mi/Gi/Ti/
 ## Pi/Ei) are powers of 1024; decimal suffixes (n/u/m/k/M/G/T/P/E) are powers of

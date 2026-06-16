@@ -1147,6 +1147,36 @@ fn op_parse_resource_ref(opts: Value) -> Result<Value> {
     Ok(json!({"kind": kind, "name": name}))
 }
 
+/// Assemble a `kind/name` resource ref from parts — the inverse of
+/// `parse_resource_ref`. With a non-empty `name` it emits `kind/name`
+/// (`deployment/nginx`); without one it emits the bare `kind` (`pods`). Neither
+/// part may contain a `/`, which would make the ref ambiguous. opts: `kind`
+/// (required), optional `name`. Returns `{ref, kind, name}`. Pure.
+fn op_build_resource_ref(opts: Value) -> Result<Value> {
+    let kind = opts
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("missing kind"))?;
+    if kind.contains('/') {
+        return Err(anyhow!("kind must not contain `/`: {kind}"));
+    }
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if let Some(n) = name {
+        if n.contains('/') {
+            return Err(anyhow!("name must not contain `/`: {n}"));
+        }
+    }
+    let r = match name {
+        Some(n) => format!("{kind}/{n}"),
+        None => kind.to_string(),
+    };
+    Ok(json!({"ref": r, "kind": kind, "name": name}))
+}
+
 /// Multiplier for a Kubernetes resource-quantity suffix: binary (Ki…Ei, powers
 /// of 1024) and decimal (n…E, powers of 1000). `None` for an unknown suffix.
 fn quantity_multiplier(suffix: &str) -> Option<f64> {
@@ -1561,6 +1591,11 @@ pub extern "C" fn k8s__selector_matches(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__parse_resource_ref(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_parse_resource_ref(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__build_resource_ref(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_build_resource_ref(opts) })
 }
 
 #[no_mangle]
@@ -2382,6 +2417,36 @@ mod tests {
         assert_eq!(bare["kind"], json!("pods"));
         assert_eq!(bare["name"], Value::Null);
         assert!(op_parse_resource_ref(json!({"ref": "a/b/c"})).is_err());
+    }
+
+    #[test]
+    fn build_resource_ref_inverts_parse_resource_ref() {
+        // kind + name → kind/name.
+        let v = op_build_resource_ref(json!({"kind": "deployment", "name": "web"})).unwrap();
+        assert_eq!(v["ref"], json!("deployment/web"));
+        // Bare kind (no name, or an empty name) → just the kind.
+        assert_eq!(
+            op_build_resource_ref(json!({"kind": "pods"})).unwrap()["ref"],
+            json!("pods")
+        );
+        assert_eq!(
+            op_build_resource_ref(json!({"kind": "pods", "name": ""})).unwrap()["ref"],
+            json!("pods")
+        );
+        // Round-trips parse_resource_ref both ways.
+        for r in ["deployment/web", "pods"] {
+            let p = op_parse_resource_ref(json!({ "ref": r })).unwrap();
+            let rebuilt = op_build_resource_ref(json!({
+                "kind": p["kind"], "name": p["name"],
+            }))
+            .unwrap();
+            assert_eq!(rebuilt["ref"], json!(r), "round-trip for {r}");
+        }
+        // Errors: missing/empty kind, and a `/` in either part.
+        assert!(op_build_resource_ref(json!({})).is_err());
+        assert!(op_build_resource_ref(json!({"kind": ""})).is_err());
+        assert!(op_build_resource_ref(json!({"kind": "a/b"})).is_err());
+        assert!(op_build_resource_ref(json!({"kind": "pod", "name": "a/b"})).is_err());
     }
 
     #[test]
