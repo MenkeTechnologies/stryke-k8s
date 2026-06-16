@@ -389,6 +389,14 @@ fn K8s::parse_quantity ($quantity) {
     K8s::_decode("parse_quantity", k8s__parse_quantity(to_json({ quantity => $quantity })))
 }
 
+## Compare two resource quantities by absolute value across unit suffixes
+## (500m vs 0.5, 1Gi vs 1024Mi) — the request-vs-limit check string comparison
+## can't do. Returns a hashref { a, b, a_value, b_value, cmp } where cmp is
+## -1 (a<b), 0 (equal), or 1 (a>b).
+fn K8s::compare_quantity ($a, $b) {
+    K8s::_decode("compare_quantity", k8s__compare_quantity(to_json({ a => $a, b => $b })))
+}
+
 ## Render a base-unit $value as a resource quantity string — inverse of
 ## parse_quantity. With $suffix the value is divided by that suffix's multiplier
 ## (104857600, "Mi" -> "100Mi"); without one, the largest binary suffix that

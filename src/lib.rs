@@ -1185,14 +1185,12 @@ const BINARY_SUFFIXES: &[(&str, i32)] = &[
 /// into its base-unit value. Binary suffixes (Ki/Mi/Gi/Ti/Pi/Ei) are powers of
 /// 1024; decimal suffixes (n/u/m/k/M/G/T/P/E) are powers of 1000. `value` is in
 /// base units (bytes for memory, cores for CPU — so `500m` → 0.5). Pure.
-fn op_parse_quantity(opts: Value) -> Result<Value> {
-    let q = opts
-        .get("quantity")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing quantity"))?;
+/// Resolve a k8s quantity string into `(number, suffix, absolute value)`. The
+/// suffix is the maximal trailing run of ASCII letters; the rest is the
+/// (possibly decimal/exponential) number. Shared by `parse_quantity` and
+/// `compare_quantity`.
+fn resolve_quantity(q: &str) -> Result<(f64, &str, f64)> {
     let q = q.trim();
-    // The suffix is the maximal trailing run of ASCII letters; the rest is the
-    // (possibly decimal or exponential) number.
     let num_end = q.trim_end_matches(|c: char| c.is_ascii_alphabetic()).len();
     let (num_str, suffix) = q.split_at(num_end);
     let mult =
@@ -1200,11 +1198,54 @@ fn op_parse_quantity(opts: Value) -> Result<Value> {
     let number: f64 = num_str
         .parse()
         .map_err(|_| anyhow!("invalid quantity number `{num_str}`"))?;
+    Ok((number, suffix, number * mult))
+}
+
+fn op_parse_quantity(opts: Value) -> Result<Value> {
+    let q = opts
+        .get("quantity")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing quantity"))?;
+    let (number, suffix, value) = resolve_quantity(q)?;
     Ok(json!({
-        "quantity": q,
+        "quantity": q.trim(),
         "number": number,
         "suffix": suffix,
-        "value": number * mult,
+        "value": value,
+    }))
+}
+
+/// Compare two k8s resource quantities by absolute value, across unit suffixes
+/// (`500m` vs `0.5`, `1Gi` vs `1024Mi`) — the request-vs-limit check that string
+/// comparison can't do. opts: `a`, `b`. Returns `{a, b, a_value, b_value, cmp}`
+/// where `cmp` is -1 (a<b), 0 (equal), or 1 (a>b); equality uses a relative
+/// epsilon so float noise from milli/SI scaling doesn't misorder equal values.
+/// Pure.
+fn op_compare_quantity(opts: Value) -> Result<Value> {
+    let a = opts
+        .get("a")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing a"))?;
+    let b = opts
+        .get("b")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing b"))?;
+    let (_, _, av) = resolve_quantity(a)?;
+    let (_, _, bv) = resolve_quantity(b)?;
+    let scale = av.abs().max(bv.abs()).max(1.0);
+    let cmp = if (av - bv).abs() <= 1e-9 * scale {
+        0
+    } else if av < bv {
+        -1
+    } else {
+        1
+    };
+    Ok(json!({
+        "a": a.trim(),
+        "b": b.trim(),
+        "a_value": av,
+        "b_value": bv,
+        "cmp": cmp,
     }))
 }
 
@@ -1442,6 +1483,11 @@ pub extern "C" fn k8s__parse_resource_ref(args: *const c_char) -> *const c_char 
 #[no_mangle]
 pub extern "C" fn k8s__parse_quantity(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_parse_quantity(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__compare_quantity(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_compare_quantity(opts) })
 }
 
 #[no_mangle]
@@ -2278,6 +2324,34 @@ mod tests {
         // Unknown suffix and garbage number error.
         assert!(op_parse_quantity(json!({"quantity": "5Xi"})).is_err());
         assert!(op_parse_quantity(json!({"quantity": "abc"})).is_err());
+    }
+
+    #[test]
+    fn compare_quantity_orders_across_unit_suffixes() {
+        let cmp = |a: &str, b: &str| {
+            op_compare_quantity(json!({"a": a, "b": b})).unwrap()["cmp"]
+                .as_i64()
+                .unwrap()
+        };
+        // Cross-unit equality that string comparison would miss.
+        assert_eq!(cmp("1Gi", "1024Mi"), 0, "1Gi == 1024Mi");
+        assert_eq!(cmp("500m", "0.5"), 0, "500m == 0.5 cores");
+        assert_eq!(
+            cmp("1000m", "1"),
+            0,
+            "1000m == 1 (milli float noise tolerated)"
+        );
+        // Ordering.
+        assert_eq!(cmp("2Gi", "1Gi"), 1, "2Gi > 1Gi");
+        assert_eq!(cmp("250m", "1"), -1, "250m < 1 core");
+        assert_eq!(cmp("1k", "999"), 1, "1k = 1000 > 999");
+        // Reported absolute values.
+        let v = op_compare_quantity(json!({"a": "1Gi", "b": "512Mi"})).unwrap();
+        assert_eq!(v["a_value"], json!(1073741824.0));
+        assert_eq!(v["cmp"], json!(1));
+        // Missing/invalid operands error.
+        assert!(op_compare_quantity(json!({"a": "1Gi"})).is_err());
+        assert!(op_compare_quantity(json!({"a": "5Xi", "b": "1"})).is_err());
     }
 
     #[test]

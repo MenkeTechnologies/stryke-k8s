@@ -169,6 +169,13 @@ assert_eq K8s::parse_quantity("1k")->{value},  1000,       "parse_quantity: deci
 assert_eq K8s::parse_quantity("1.5")->{value}, 1.5,        "parse_quantity: bare decimal"
 assert_eq K8s::parse_quantity("1e3")->{value}, 1000,       "parse_quantity: exponent number"
 
+# compare_quantity: order resource quantities across unit suffixes.
+assert_eq K8s::compare_quantity("1Gi", "1024Mi")->{cmp}, 0,  "compare_quantity: 1Gi == 1024Mi"
+assert_eq K8s::compare_quantity("500m", "0.5")->{cmp},   0,  "compare_quantity: 500m == 0.5 cores"
+assert_eq K8s::compare_quantity("2Gi", "1Gi")->{cmp},    1,  "compare_quantity: 2Gi > 1Gi"
+assert_eq K8s::compare_quantity("250m", "1")->{cmp},    -1,  "compare_quantity: 250m < 1 core"
+assert_dies fn { K8s::compare_quantity("5Xi", "1") },        "compare_quantity: rejects an unknown suffix"
+
 # format_quantity: inverse of parse_quantity.
 assert_eq K8s::format_quantity(104857600, "Mi")->{quantity}, "100Mi", "format_quantity: explicit Mi suffix"
 assert_eq K8s::format_quantity(0.5, "m")->{quantity},        "500m",  "format_quantity: milli-CPU"
