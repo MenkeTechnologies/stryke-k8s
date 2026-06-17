@@ -252,6 +252,16 @@ assert_eq K8s::sum_quantities("500m", "0.5", "250m")->{value}, 1.25, "sum_quanti
 assert_dies fn { K8s::sum_quantities() }, "sum_quantities: rejects an empty list"
 assert_dies fn { K8s::sum_quantities("100Xi") }, "sum_quantities: rejects an unknown suffix"
 
+# sub_quantity: pairwise headroom (a - b), the companion to sum_quantities.
+val $hr = K8s::sub_quantity("8Gi", "2Gi")
+assert_eq $hr->{quantity}, "6Gi",    "sub_quantity: 8Gi - 2Gi = 6Gi (keeps a's suffix)"
+assert_eq $hr->{negative}, 0,        "sub_quantity: positive headroom is not negative"
+assert_eq K8s::sub_quantity("1Gi", "512Mi")->{quantity}, "0.5Gi", "sub_quantity: cross-unit 1Gi - 512Mi = 0.5Gi"
+assert_eq K8s::sub_quantity("8Gi", "1536Mi", "Mi")->{quantity}, "6656Mi", "sub_quantity: explicit suffix renders in Mi"
+val $over = K8s::sub_quantity("1Gi", "2Gi")
+assert_eq $over->{negative}, 1,      "sub_quantity: over-allocation reports negative (not clamped)"
+assert_dies fn { K8s::sub_quantity("1Gi", "1Xi") }, "sub_quantity: rejects an unknown suffix"
+
 # scale_quantity: multiply a quantity by a scalar (replicas × per-pod request).
 val $scaled = K8s::scale_quantity("256Mi", 3)
 assert_eq $scaled->{quantity}, "768Mi", "scale_quantity: 256Mi×3=768Mi keeps the unit"

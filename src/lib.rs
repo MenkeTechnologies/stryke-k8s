@@ -1564,6 +1564,48 @@ fn op_sum_quantities(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Subtract one Kubernetes resource quantity from another — `a - b` (the pairwise
+/// companion to sum_quantities, which only adds a list). The common use is
+/// resource headroom: `allocatable - requested`, `limit - used`. Both operands are
+/// resolved to a base value, subtracted, and re-rendered; a Quantity may be
+/// negative (over-allocation), so a negative result is reported faithfully with a
+/// `negative` flag. The result keeps `a`'s suffix unless an explicit `suffix`
+/// overrides (e.g. `8Gi - 1500Mi` → `6656Mi` only if asked; otherwise `6.5Gi`).
+/// opts: `a` (or `from`), `b` (or `subtract`), `suffix` (optional). Returns
+/// `{quantity, number, suffix, value, negative}`. Pure.
+fn op_sub_quantity(opts: Value) -> Result<Value> {
+    let a = opts
+        .get("a")
+        .or_else(|| opts.get("from"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing a (the quantity to subtract from)"))?;
+    let b = opts
+        .get("b")
+        .or_else(|| opts.get("subtract"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing b (the quantity to subtract)"))?;
+    let (_, a_suffix, av) = resolve_quantity(a)?;
+    let (_, _, bv) = resolve_quantity(b)?;
+    let diff = av - bv;
+    // Render in `a`'s suffix by default (so the result reads in the same unit the
+    // headroom was asked about), unless `suffix` overrides.
+    let explicit = opts.get("suffix").and_then(Value::as_str).or({
+        if a_suffix.is_empty() {
+            None
+        } else {
+            Some(a_suffix)
+        }
+    });
+    let (quantity, number, suffix) = render_quantity(diff, explicit)?;
+    Ok(json!({
+        "quantity": quantity,
+        "number": number,
+        "suffix": suffix,
+        "value": diff,
+        "negative": diff < 0.0,
+    }))
+}
+
 /// Scale a Kubernetes resource quantity by a scalar `factor` — the multiply
 /// companion to `sum_quantities`'s add. A Deployment's total request is
 /// `replicas × per-pod request`, so `scale_quantity("256Mi", 3)` → `768Mi`. The
@@ -1847,6 +1889,11 @@ pub extern "C" fn k8s__format_quantity(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__sum_quantities(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_sum_quantities(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__sub_quantity(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_sub_quantity(opts) })
 }
 
 #[no_mangle]
@@ -3006,6 +3053,47 @@ mod tests {
         assert!(op_sum_quantities(json!({})).is_err());
         assert!(op_sum_quantities(json!({"quantities": ["100Xi"]})).is_err());
         assert!(op_sum_quantities(json!({"quantities": [100]})).is_err());
+    }
+
+    #[test]
+    fn sub_quantity_computes_headroom_and_allows_negative() {
+        // Resource headroom in the same unit as the minuend.
+        let r = op_sub_quantity(json!({"a": "8Gi", "b": "2Gi"})).unwrap();
+        assert_eq!(r["quantity"], json!("6Gi"));
+        assert_eq!(r["negative"], json!(false));
+        // Mixed units resolve to a common base; default renders in a's suffix.
+        let m = op_sub_quantity(json!({"a": "1Gi", "b": "512Mi"})).unwrap();
+        assert_eq!(m["quantity"], json!("0.5Gi"));
+        // `from`/`subtract` aliases work; a suffixless minuend renders suffixless.
+        assert_eq!(
+            op_sub_quantity(json!({"from": "2", "subtract": "500m"})).unwrap()["quantity"],
+            json!("1.5")
+        );
+        // ...and an explicit milli suffix renders the same value as millicores.
+        assert_eq!(
+            op_sub_quantity(json!({"from": "2", "subtract": "500m", "suffix": "m"})).unwrap()
+                ["quantity"],
+            json!("1500m")
+        );
+        // Over-allocation: a negative Quantity is reported faithfully, not clamped.
+        let neg = op_sub_quantity(json!({"a": "1Gi", "b": "2Gi"})).unwrap();
+        assert_eq!(neg["negative"], json!(true));
+        assert!(neg["value"].as_f64().unwrap() < 0.0);
+        // An explicit suffix overrides the rendering unit.
+        assert_eq!(
+            op_sub_quantity(json!({"a": "8Gi", "b": "1536Mi", "suffix": "Mi"})).unwrap()
+                ["quantity"],
+            json!("6656Mi")
+        );
+        // Exact difference is zero.
+        assert_eq!(
+            op_sub_quantity(json!({"a": "2Gi", "b": "2Gi"})).unwrap()["value"],
+            json!(0.0)
+        );
+        // Errors: missing operand, bad unit.
+        assert!(op_sub_quantity(json!({"a": "1Gi"})).is_err());
+        assert!(op_sub_quantity(json!({"b": "1Gi"})).is_err());
+        assert!(op_sub_quantity(json!({"a": "1Xi", "b": "1Gi"})).is_err());
     }
 
     #[test]

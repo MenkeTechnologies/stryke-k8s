@@ -269,6 +269,7 @@ K8s::parse_quantity($qty)       → { quantity, number, suffix, value }  # 100Mi
 K8s::format_quantity($value, $suffix?) → { quantity, number, suffix, value }  # bytes→100Mi; inverse of parse_quantity
 K8s::compare_quantity($a, $b)   → { a, b, a_value, b_value, cmp }  # order quantities across units (1Gi vs 1024Mi); cmp -1/0/1
 K8s::sum_quantities(@quantities) → { count, value, quantity }  # total a list across units (container memory requests); 100Mi+256Mi+128Mi→484Mi
+K8s::sub_quantity($a, $b, $suffix?) → { quantity, number, suffix, value, negative }  # pairwise a-b headroom (allocatable-requested, limit-used); 8Gi-2Gi→6Gi; negative (over-allocation) reported, not clamped
 K8s::scale_quantity($quantity, $factor, $suffix?) → { quantity, number, suffix, value, factor }  # multiply by a scalar (replicas × per-pod request); 256Mi×3→768Mi, keeps the unit
 ```
 
