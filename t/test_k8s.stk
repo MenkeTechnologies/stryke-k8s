@@ -363,4 +363,49 @@ assert_eq $drain->{evictable}[0]{name}, "web-1",         "drain_filter: evictabl
 assert_eq scalar(@{ $drain->{skipped} }), 3,             "drain_filter: three pods skipped"
 assert_eq $drain->{skipped}[0]{reason}, "DaemonSet-managed", "drain_filter: DaemonSet reason"
 
+# normalize_quantity: canonicalize a quantity string to its shortest form.
+assert_eq K8s::normalize_quantity("1024Mi")->{quantity}, "1Gi",  "normalize_quantity: 1024Mi → 1Gi"
+assert_eq K8s::normalize_quantity("0.5")->{quantity},    "500m", "normalize_quantity: 0.5 cores → 500m"
+assert_eq K8s::normalize_quantity("1500m")->{quantity},  "1.5",  "normalize_quantity: 1500m → 1.5"
+assert_eq K8s::normalize_quantity("1024Mi")->{value}, 1073741824, "normalize_quantity: base value preserved"
+assert_dies fn { K8s::normalize_quantity("10Zz") }, "normalize_quantity: rejects unknown suffix"
+
+# container_images: pull images from a workload (init first, de-duplicated).
+val %deployobj = (spec => { template => { spec => {
+    initContainers => [ { name => "init", image => "busybox:1.36" } ],
+    containers     => [
+        { name => "app",     image => "nginx:1.27" },
+        { name => "sidecar", image => "busybox:1.36" },
+    ],
+} } })
+val $ci = K8s::container_images(\%deployobj)
+assert_eq scalar(@{ $ci->{containers} }), 3,        "container_images: three containers"
+assert_eq $ci->{containers}[0]{name}, "init",       "container_images: init container first"
+assert_ok $ci->{containers}[0]{init},               "container_images: init flagged"
+assert_eq scalar(@{ $ci->{images} }), 2,            "container_images: images de-duplicated"
+# Bare Pod shape (containers directly under spec).
+val %podimg = (spec => { containers => [ { name => "c", image => "redis:7" } ] })
+assert_eq K8s::container_images(\%podimg)->{images}[0], "redis:7", "container_images: bare Pod shape"
+
+# condition: read a named status condition tri-state.
+val %condobj = (status => { conditions => [
+    { type => "Available",   status => "True",  reason => "MinimumReplicasAvailable" },
+    { type => "Progressing", status => "False", reason => "ProgressDeadlineExceeded", message => "deadline" },
+] })
+val $cond = K8s::condition(\%condobj, "available")
+assert_ok $cond->{found},                                "condition: case-insensitive type match"
+assert_ok $cond->{is_true},                              "condition: True status"
+assert_eq $cond->{reason}, "MinimumReplicasAvailable",   "condition: reason surfaced"
+assert_eq K8s::condition(\%condobj, "Progressing")->{is_true}, 0, "condition: False is not is_true"
+val $missing = K8s::condition(\%condobj, "Ready")
+assert_eq $missing->{found}, 0,                          "condition: missing condition found=false"
+assert_ok !defined($missing->{status}),                 "condition: missing condition status undef"
+
+# age_seconds: age from metadata.creationTimestamp (epoch → large positive).
+val %ageobj = (metadata => { creationTimestamp => "1970-01-01T00:00:00Z" })
+assert_ok K8s::age_seconds(\%ageobj)->{age_seconds} > 1000000000, "age_seconds: epoch is decades old"
+# A future timestamp clamps to 0 (clock skew), never negative.
+val %futureobj = (metadata => { creationTimestamp => "2999-01-01T00:00:00Z" })
+assert_eq K8s::age_seconds(\%futureobj)->{age_seconds}, 0, "age_seconds: future timestamp clamps to 0"
+
 test_run

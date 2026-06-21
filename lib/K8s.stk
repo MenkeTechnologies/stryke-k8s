@@ -364,6 +364,44 @@ fn K8s::untaint ($name, $key, %opts) {
     K8s::_decode("untaint", k8s__taint(to_json($r)))
 }
 
+# ── raw / health / scale (live) ───────────────────────────────────────
+
+## Raw HTTP request against an arbitrary apiserver $path — the escape hatch for
+## endpoints with no typed op (custom subresources, aggregated APIs, /openapi/v2,
+## a CRD's /status). opts: method (GET|DELETE, default GET — the body-less verbs;
+## use create/replace/patch for writes), context. Returns a hashref
+## { path, method, status, body, json } where `json` is the decoded body when it
+## parses as JSON (else undef — /healthz returns the bare token "ok").
+fn K8s::raw ($path, %opts) {
+    val $r = K8s::_req(
+        { path => $path, method => ($opts{method} // "GET") },
+        \%opts
+    )
+    K8s::_decode("raw", k8s__raw(to_json($r)))
+}
+
+## Probe an apiserver health endpoint — /livez, /readyz or /healthz. opts: path
+## (one of livez|readyz|healthz, default readyz; a bare word is prefixed with "/"),
+## context. A failed probe is reported as ok => false with the server's reason
+## rather than dying. Returns a hashref { ok, path, body }.
+fn K8s::healthz (%opts) {
+    val $r = K8s::_req({ path => $opts{path} }, \%opts)
+    K8s::_decode("healthz", k8s__healthz(to_json($r)))
+}
+
+## Read a workload's current scale via the /scale subresource — the read
+## counterpart of K8s::scale (which only writes). opts: kind (default Deployment),
+## namespace, context. Returns a hashref { name, replicas, current_replicas,
+## selector } where replicas is spec.replicas (desired) and current_replicas is
+## status.replicas (observed).
+fn K8s::get_scale ($name, %opts) {
+    val $r = K8s::_req(
+        { kind => ($opts{kind} // "Deployment"), name => $name, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("get_scale", k8s__get_scale(to_json($r)))
+}
+
 # ── pure helpers (no cluster) ─────────────────────────────────────────
 
 ## Validate a Kubernetes object name. opts: mode => "subdomain" (default) or
@@ -597,5 +635,44 @@ fn K8s::diff_merge_patch ($from, $to) {
 ## { evictable, skipped } where each entry is { name, namespace, reason? }.
 fn K8s::drain_filter (@pods) {
     K8s::_decode("drain_filter", k8s__drain_filter(to_json({ pods => \@pods })))
+}
+
+## Canonicalize a resource quantity STRING — round-trip it to the shortest
+## equivalent the apiserver emits: 1024Mi → 1Gi, 0.5 (CPU) → 500m, 1500m → 1.5.
+## Unlike format_quantity (which takes a base-unit number), this takes a quantity
+## string. Returns a hashref { input, quantity, value } where `quantity` is the
+## canonical string and `value` the base-unit amount.
+fn K8s::normalize_quantity ($quantity) {
+    K8s::_decode("normalize_quantity", k8s__normalize_quantity(to_json({ quantity => $quantity })))
+}
+
+## Extract every container image from a Pod or a workload ($object) whose
+## spec.template holds a PodSpec (Deployment/StatefulSet/DaemonSet/Job). Walks
+## initContainers then containers (init first), for both the bare-Pod
+## (spec.containers) and workload (spec.template.spec.containers) shapes. Returns
+## a hashref { containers, images } where containers is a list of
+## { name, image, init } and images is the de-duplicated image list.
+fn K8s::container_images ($object) {
+    K8s::_decode("container_images", k8s__container_images(to_json({ object => $object })))
+}
+
+## Read one named condition from any $object's status.conditions — the general
+## form of the Ready-only check pod_status/wait do internally, for any condition
+## type (Available/Progressing on a Deployment, PodScheduled/ContainersReady on a
+## Pod). $type is the condition type (matched case-insensitively). Returns a
+## hashref { type, status, reason, message, found, is_true } where status is the
+## raw tri-state ("True"/"False"/"Unknown"), is_true the boolean shortcut, and
+## found is false (rest undef) when the object has no such condition.
+fn K8s::condition ($object, $type) {
+    K8s::_decode("condition", k8s__condition(to_json({ object => $object, type => $type })))
+}
+
+## Age of an object in seconds — the AGE column of `kubectl get`, computed from
+## metadata.creationTimestamp (RFC3339) against the local wall clock. Pass either
+## $object (an object carrying the timestamp) or, as $object, the RFC3339 string
+## directly is NOT accepted — use the object form. A future timestamp (clock skew)
+## clamps to 0. Returns a hashref { timestamp, age_seconds }.
+fn K8s::age_seconds ($object) {
+    K8s::_decode("age_seconds", k8s__age_seconds(to_json({ object => $object })))
 }
 

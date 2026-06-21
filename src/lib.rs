@@ -891,6 +891,275 @@ async fn op_taint(opts: Value) -> Result<Value> {
     Ok(to_value(out))
 }
 
+/// Raw HTTP request against an arbitrary apiserver path — the escape hatch for
+/// endpoints this package has no typed op for (custom subresources, aggregated
+/// APIs, `/openapi/v2`, a CRD's `/status`). opts: `path` (required, e.g.
+/// `/api/v1/namespaces/default/pods`), `method` (GET|DELETE, default GET — the
+/// body-less verbs; create/replace/patch already have typed ops), `context`.
+/// The response is returned both as the raw `body` text and, when it parses as
+/// JSON, the decoded `json` (otherwise `json` is null — `/healthz` returns the
+/// bare string `ok`). Returns `{path, method, status: "ok", body, json}`.
+async fn op_raw(opts: Value) -> Result<Value> {
+    let path = opts["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path (an apiserver URL path like /api/v1/...)"))?;
+    if !path.starts_with('/') {
+        return Err(anyhow!("path must start with `/`: {path}"));
+    }
+    let method = opts["method"].as_str().unwrap_or("GET").to_uppercase();
+    let c = get_client(&opts).await?;
+    let req = match method.as_str() {
+        "GET" => http::Request::get(path).body(Vec::new())?,
+        "DELETE" => http::Request::delete(path).body(Vec::new())?,
+        other => {
+            return Err(anyhow!(
+                "raw: unsupported method `{other}` (want GET|DELETE — \
+                 use create/replace/patch for write verbs)"
+            ))
+        }
+    };
+    let body = c.request_text(req).await?;
+    // Surface the parsed JSON when the body is JSON; healthz-style endpoints
+    // return a bare token (`ok`), which leaves `json` null.
+    let json: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    Ok(json!({
+        "path": path,
+        "method": method,
+        "status": "ok",
+        "body": body,
+        "json": json,
+    }))
+}
+
+/// Probe an apiserver health endpoint — `/livez`, `/readyz`, or `/healthz`. The
+/// endpoint returns the bare string `ok` (HTTP 200) when healthy and a non-2xx
+/// status otherwise, which `request_text` surfaces as an error — so a failed
+/// probe is reported as `{ok: false}` with the server's reason rather than
+/// thrown. opts: `path` (one of livez|readyz|healthz, default `/readyz`; a bare
+/// word is prefixed with `/`), `context`. Returns `{ok, path, body}`.
+async fn op_healthz(opts: Value) -> Result<Value> {
+    let raw = opts["path"].as_str().unwrap_or("readyz");
+    let path = if raw.starts_with('/') {
+        raw.to_string()
+    } else {
+        format!("/{raw}")
+    };
+    let c = get_client(&opts).await?;
+    let req = http::Request::get(&path).body(Vec::new())?;
+    match c.request_text(req).await {
+        Ok(body) => Ok(json!({ "ok": true, "path": path, "body": body })),
+        Err(e) => Ok(json!({ "ok": false, "path": path, "body": e.to_string() })),
+    }
+}
+
+/// Read a workload's current scale via the `/scale` subresource — the read
+/// counterpart of `scale` (which only writes). Returns the desired and observed
+/// replica counts and the status selector kubectl shows, without pulling the
+/// whole object. opts: `kind` (default Deployment), `name`, `namespace`,
+/// `context`. Returns `{name, replicas, current_replicas, selector}` where
+/// `replicas` is `spec.replicas` (desired) and `current_replicas` is
+/// `status.replicas` (observed).
+async fn op_get_scale(opts: Value) -> Result<Value> {
+    let kind = opts["kind"].as_str().unwrap_or("Deployment");
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    let api = api_for(&c, kind, namespace).await?;
+    // The scale subresource returns an autoscaling/v1 Scale object; deserialize
+    // it as a DynamicObject (flexible) and read its spec/status.
+    let scale = api.get_subresource("scale", name).await?;
+    let v = to_value(&scale);
+    Ok(json!({
+        "name": name,
+        "replicas": v["spec"]["replicas"],
+        "current_replicas": v["status"]["replicas"],
+        "selector": v["status"]["selector"],
+    }))
+}
+
+/// Canonicalize a Kubernetes resource quantity — round-trip it through the same
+/// parse + compact-render the apiserver applies, so `1024Mi` → `1Gi`,
+/// `0.5` (CPU) → `500m`, `1500m` → `1500m`. Unlike `format_quantity` (which
+/// takes a base-unit number), this takes a quantity STRING and re-emits the
+/// shortest equivalent: the largest binary suffix that divides a byte-scale
+/// value exactly, or `m` for a sub-unit CPU value. opts: `quantity`. Returns
+/// `{input, quantity, value}` where `quantity` is the canonical string and
+/// `value` the base-unit amount. Pure.
+fn op_normalize_quantity(opts: Value) -> Result<Value> {
+    let input = opts
+        .get("quantity")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing quantity"))?;
+    let (_, _, value) = resolve_quantity(input)?;
+    // A sub-1 value with no exact binary suffix reads best in milli (CPU's `m`);
+    // otherwise let render_quantity pick the largest exact binary suffix.
+    let no_binary = !BINARY_SUFFIXES.iter().any(|(_, pow)| {
+        let mult = 2f64.powi(*pow);
+        value.abs() >= mult && (value / mult).fract() == 0.0
+    });
+    let explicit = if value != 0.0 && value.abs() < 1.0 && no_binary {
+        Some("m")
+    } else {
+        None
+    };
+    let (quantity, _, _) = render_quantity(value, explicit)?;
+    Ok(json!({
+        "input": input.trim(),
+        "quantity": quantity,
+        "value": value,
+    }))
+}
+
+/// Extract every container image from a Pod (or a workload whose
+/// `spec.template` holds a PodSpec — Deployment/StatefulSet/DaemonSet/Job). Walks
+/// both the regular `containers` and the `initContainers`, returning each as
+/// `{name, image, init}` in declaration order (init containers first). The pod
+/// spec is located at `spec.containers` for a bare Pod and
+/// `spec.template.spec.containers` for a workload — both are checked, so the same
+/// helper handles either object. opts: `object` (or `pod`). Returns
+/// `{containers, images}` where `images` is the de-duplicated image list. Pure.
+fn op_container_images(opts: Value) -> Result<Value> {
+    let object = opts
+        .get("object")
+        .or_else(|| opts.get("pod"))
+        .filter(|v| v.is_object())
+        .ok_or_else(|| anyhow!("missing object (a Pod or workload object)"))?;
+    // PodSpec lives directly under spec for a Pod, or spec.template.spec for a
+    // workload — prefer whichever has containers.
+    let pod_spec = if object["spec"]["containers"].is_array() {
+        &object["spec"]
+    } else {
+        &object["spec"]["template"]["spec"]
+    };
+    let mut containers = Vec::new();
+    let mut images = Vec::new();
+    for (field, init) in [("initContainers", true), ("containers", false)] {
+        if let Some(arr) = pod_spec[field].as_array() {
+            for c in arr {
+                let image = c["image"].clone();
+                if let Some(img) = image.as_str() {
+                    let img = img.to_string();
+                    if !images.contains(&img) {
+                        images.push(img);
+                    }
+                }
+                containers.push(json!({
+                    "name": c["name"],
+                    "image": image,
+                    "init": init,
+                }));
+            }
+        }
+    }
+    Ok(json!({ "containers": containers, "images": images }))
+}
+
+/// Read one named condition from any object's `status.conditions` — the
+/// general form of the Ready-only check `pod_status`/`wait` do internally, for
+/// any condition type (`Available`/`Progressing` on a Deployment,
+/// `PodScheduled`/`ContainersReady` on a Pod, `NetworkUnavailable` on a Node).
+/// opts: `object`, `type` (the condition type). Returns
+/// `{type, status, reason, message, found, is_true}` where `status` is the
+/// raw tri-state string (`True`/`False`/`Unknown`), `is_true` is the boolean
+/// shortcut, and `found` is false (with the rest null) when the object carries
+/// no such condition. Pure.
+fn op_condition(opts: Value) -> Result<Value> {
+    let object = opts
+        .get("object")
+        .or_else(|| opts.get("pod"))
+        .filter(|v| v.is_object())
+        .ok_or_else(|| anyhow!("missing object"))?;
+    let want = opts
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing type (a condition type)"))?;
+    let found = object["status"]["conditions"]
+        .as_array()
+        .and_then(|arr| {
+            arr.iter().find(|c| {
+                c["type"]
+                    .as_str()
+                    .map(|t| t.eq_ignore_ascii_case(want))
+                    .unwrap_or(false)
+            })
+        })
+        .cloned();
+    match found {
+        Some(c) => Ok(json!({
+            "type": c["type"],
+            "status": c["status"],
+            "reason": c["reason"],
+            "message": c["message"],
+            "found": true,
+            "is_true": c["status"].as_str() == Some("True"),
+        })),
+        None => Ok(json!({
+            "type": want,
+            "status": Value::Null,
+            "reason": Value::Null,
+            "message": Value::Null,
+            "found": false,
+            "is_true": false,
+        })),
+    }
+}
+
+/// Age of an object in seconds — the AGE column of `kubectl get`, computed from
+/// `metadata.creationTimestamp` (an RFC3339 string) against the current wall
+/// clock. A timestamp in the future (clock skew) yields a clamped 0 rather than
+/// a negative age. opts: `object` (an object with the timestamp) OR `timestamp`
+/// (the RFC3339 string directly). Returns `{timestamp, age_seconds}`. The clock
+/// is read locally; no cluster call.
+fn op_age_seconds(opts: Value) -> Result<Value> {
+    let ts = opts
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .or_else(|| {
+            opts.get("object")
+                .and_then(|o| o["metadata"]["creationTimestamp"].as_str())
+                .map(String::from)
+        })
+        .ok_or_else(|| anyhow!("missing timestamp (or object.metadata.creationTimestamp)"))?;
+    let created =
+        rfc3339_to_unix(&ts).ok_or_else(|| anyhow!("invalid RFC3339 timestamp `{ts}`"))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let age = (now - created).max(0);
+    Ok(json!({ "timestamp": ts, "age_seconds": age }))
+}
+
+/// Convert an RFC3339 UTC timestamp (`2024-01-02T03:04:05Z`, optionally with a
+/// fractional second) to Unix seconds. Only the `Z` (UTC) form k8s emits for
+/// `creationTimestamp` is handled; returns `None` for anything malformed.
+fn rfc3339_to_unix(ts: &str) -> Option<i64> {
+    // Shape: YYYY-MM-DDTHH:MM:SS[.frac]Z
+    let ts = ts.strip_suffix('Z')?;
+    let (date, time) = ts.split_once('T')?;
+    let d: Vec<i64> = date.split('-').filter_map(|p| p.parse().ok()).collect();
+    let time = time.split('.').next().unwrap_or(time);
+    let t: Vec<i64> = time.split(':').filter_map(|p| p.parse().ok()).collect();
+    if d.len() != 3 || t.len() != 3 {
+        return None;
+    }
+    let (year, month, day) = (d[0], d[1], d[2]);
+    let (hour, min, sec) = (t[0], t[1], t[2]);
+    // Days since the Unix epoch via the civil-from-days algorithm (Howard
+    // Hinnant's `days_from_civil`), valid for the proleptic Gregorian calendar.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + hour * 3600 + min * 60 + sec)
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call_async<F, Fut>(args: *const c_char, handler: F) -> *const c_char
@@ -2467,6 +2736,41 @@ pub extern "C" fn k8s__diff_merge_patch(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__drain_filter(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_drain_filter(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__raw(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_raw)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__healthz(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_healthz)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__get_scale(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_get_scale)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__normalize_quantity(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_normalize_quantity(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__container_images(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_container_images(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__condition(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_condition(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__age_seconds(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_age_seconds(opts) })
 }
 
 #[cfg(test)]
@@ -4059,5 +4363,130 @@ mod tests {
         assert_eq!(node_roles(&node), vec!["control-plane", "master"]);
         // Unlabelled node → the <none> sentinel kubectl shows.
         assert_eq!(node_roles(&json!({"metadata": {}})), vec!["<none>"]);
+    }
+
+    /// `normalize_quantity` collapses an over-specified quantity to the shortest
+    /// equivalent the apiserver would emit: 1024Mi == 1Gi, an integral byte count
+    /// picks the largest exact binary suffix, and a sub-1 CPU value reads in milli.
+    /// A value with no exact binary divisor and not sub-1 stays suffix-less.
+    #[test]
+    fn normalize_quantity_canonicalizes() {
+        let n = op_normalize_quantity(json!({"quantity": "1024Mi"})).unwrap();
+        assert_eq!(n["quantity"], json!("1Gi"));
+        assert_eq!(n["value"], json!(1073741824.0));
+
+        // 0.5 cores → 500m (sub-1, no exact binary suffix).
+        assert_eq!(
+            op_normalize_quantity(json!({"quantity": "0.5"})).unwrap()["quantity"],
+            json!("500m")
+        );
+        // 1500m stays 1500m: 1.5 has no exact binary suffix and is not sub-1.
+        assert_eq!(
+            op_normalize_quantity(json!({"quantity": "1500m"})).unwrap()["quantity"],
+            json!("1.5")
+        );
+        // A plain integer with no binary divisor stays bare.
+        assert_eq!(
+            op_normalize_quantity(json!({"quantity": "3"})).unwrap()["quantity"],
+            json!("3")
+        );
+        assert!(op_normalize_quantity(json!({})).is_err());
+        assert!(op_normalize_quantity(json!({"quantity": "10Zz"})).is_err());
+    }
+
+    /// `container_images` walks initContainers then containers, for both a bare
+    /// Pod (spec.containers) and a workload (spec.template.spec.containers), and
+    /// de-duplicates the image list while preserving per-container entries.
+    #[test]
+    fn container_images_walks_pod_and_workload() {
+        // Workload shape with an init container sharing the app image.
+        let deploy = json!({"spec": {"template": {"spec": {
+            "initContainers": [{"name": "init", "image": "busybox:1.36"}],
+            "containers": [
+                {"name": "app", "image": "nginx:1.27"},
+                {"name": "sidecar", "image": "busybox:1.36"},
+            ],
+        }}}});
+        let r = op_container_images(json!({"object": deploy})).unwrap();
+        let cs = r["containers"].as_array().unwrap();
+        assert_eq!(cs.len(), 3);
+        // Init container comes first and is flagged.
+        assert_eq!(cs[0]["name"], json!("init"));
+        assert_eq!(cs[0]["init"], json!(true));
+        assert_eq!(cs[1]["init"], json!(false));
+        // Image list is de-duplicated (busybox appears twice).
+        assert_eq!(r["images"], json!(["busybox:1.36", "nginx:1.27"]));
+
+        // Bare Pod shape: containers live directly under spec.
+        let pod = json!({"spec": {"containers": [{"name": "c", "image": "redis:7"}]}});
+        let p = op_container_images(json!({"pod": pod})).unwrap();
+        assert_eq!(p["images"], json!(["redis:7"]));
+        assert!(op_container_images(json!({})).is_err());
+    }
+
+    /// `condition` reads any named condition tri-state, case-insensitively on the
+    /// type, and reports found=false (with null fields) for a missing condition.
+    /// `is_true` is the boolean shortcut and only True passes.
+    #[test]
+    fn condition_reads_named_tristate() {
+        let obj = json!({"status": {"conditions": [
+            {"type": "Available", "status": "True", "reason": "MinimumReplicasAvailable"},
+            {"type": "Progressing", "status": "False", "reason": "ProgressDeadlineExceeded",
+             "message": "deadline"},
+        ]}});
+        let a = op_condition(json!({"object": obj, "type": "available"})).unwrap();
+        assert_eq!(a["found"], json!(true));
+        assert_eq!(a["is_true"], json!(true));
+        assert_eq!(a["reason"], json!("MinimumReplicasAvailable"));
+
+        let p = op_condition(json!({"object": obj, "type": "Progressing"})).unwrap();
+        assert_eq!(p["is_true"], json!(false));
+        assert_eq!(p["message"], json!("deadline"));
+
+        let m = op_condition(json!({"object": obj, "type": "Ready"})).unwrap();
+        assert_eq!(m["found"], json!(false));
+        assert_eq!(m["is_true"], json!(false));
+        assert_eq!(m["status"], json!(null));
+        assert!(op_condition(json!({"object": obj})).is_err());
+        assert!(op_condition(json!({"type": "Ready"})).is_err());
+    }
+
+    /// `rfc3339_to_unix` converts the `...Z` timestamps k8s emits, with and
+    /// without fractional seconds, and rejects malformed input. The epoch and a
+    /// known modern instant are checked against fixed Unix values.
+    #[test]
+    fn rfc3339_to_unix_matches_known_instants() {
+        assert_eq!(rfc3339_to_unix("1970-01-01T00:00:00Z"), Some(0));
+        // 2024-01-02T03:04:05Z = 1704164645 (verified against `date -u -d`).
+        assert_eq!(rfc3339_to_unix("2024-01-02T03:04:05Z"), Some(1704164645));
+        // Fractional seconds are truncated, not rejected.
+        assert_eq!(
+            rfc3339_to_unix("2024-01-02T03:04:05.123456Z"),
+            Some(1704164645)
+        );
+        assert_eq!(rfc3339_to_unix("2024-01-02 03:04:05Z"), None, "needs T");
+        assert_eq!(rfc3339_to_unix("2024-01-02T03:04:05"), None, "needs Z");
+        assert_eq!(rfc3339_to_unix("not-a-time"), None);
+    }
+
+    /// `age_seconds` computes a non-negative age from a timestamp, accepts either
+    /// a bare `timestamp` or an object's `metadata.creationTimestamp`, and clamps
+    /// a future timestamp to 0 (clock skew) rather than going negative.
+    #[test]
+    fn age_seconds_clamps_and_reads_object() {
+        // Epoch is decades ago → a large positive age.
+        let a = op_age_seconds(json!({"timestamp": "1970-01-01T00:00:00Z"})).unwrap();
+        assert!(a["age_seconds"].as_i64().unwrap() > 1_000_000_000);
+        // Far-future timestamp clamps to 0, never negative.
+        let f = op_age_seconds(json!({"timestamp": "2999-01-01T00:00:00Z"})).unwrap();
+        assert_eq!(f["age_seconds"], json!(0));
+        // Reads metadata.creationTimestamp off an object.
+        let o = op_age_seconds(
+            json!({"object": {"metadata": {"creationTimestamp": "1970-01-01T00:00:00Z"}}}),
+        )
+        .unwrap();
+        assert!(o["age_seconds"].as_i64().unwrap() > 1_000_000_000);
+        assert!(op_age_seconds(json!({})).is_err());
+        assert!(op_age_seconds(json!({"timestamp": "bad"})).is_err());
     }
 }

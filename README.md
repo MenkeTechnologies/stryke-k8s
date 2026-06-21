@@ -233,6 +233,7 @@ K8s::patch             $kind, $name, \%patch, %opts → \%patched   # opts: type
 K8s::delete_resource   $kind, $name, %opts → \%result   # opts: namespace
 K8s::delete_collection $kind, %opts → { deleted, pending }   # delete all matching a selector; opts: label_selector, field_selector, namespace
 K8s::scale             $kind, $name, $replicas, %opts → \%scale
+K8s::get_scale         $name, %opts → { name, replicas, current_replicas, selector }  # read the /scale subresource; opts: kind (default Deployment), namespace
 ```
 
 `patch` does a JSON merge patch by default (`type => "strategic"` for a
@@ -275,12 +276,16 @@ K8s::parse_image_ref($image)    → { image, registry, repository, tag, digest }
 K8s::build_image_ref($repo, %opts) → { image, registry, repository, tag, digest }  # inverse; opts: registry, tag, digest
 K8s::parse_quantity($qty)       → { quantity, number, suffix, value }  # 100Mi→bytes, 500m→0.5 cores
 K8s::format_quantity($value, $suffix?) → { quantity, number, suffix, value }  # bytes→100Mi; inverse of parse_quantity
+K8s::normalize_quantity($qty)   → { input, quantity, value }  # canonicalize a quantity string; 1024Mi→1Gi, 0.5→500m, 1500m→1.5
 K8s::compare_quantity($a, $b)   → { a, b, a_value, b_value, cmp }  # order quantities across units (1Gi vs 1024Mi); cmp -1/0/1
 K8s::sum_quantities(@quantities) → { count, value, quantity }  # total a list across units (container memory requests); 100Mi+256Mi+128Mi→484Mi
 K8s::sub_quantity($a, $b, $suffix?) → { quantity, number, suffix, value, negative }  # pairwise a-b headroom (allocatable-requested, limit-used); 8Gi-2Gi→6Gi; negative (over-allocation) reported, not clamped
 K8s::scale_quantity($quantity, $factor, $suffix?) → { quantity, number, suffix, value, factor }  # multiply by a scalar (replicas × per-pod request); 256Mi×3→768Mi, keeps the unit
 K8s::resource_ratio($used, $total) → { used, total, used_value, total_value, ratio, percent }  # utilization across units; 512Mi of 1Gi → 50%
 K8s::pod_status($pod)           → { phase, ready, ready_containers, total_containers, restarts }  # readiness summary from a Pod object (kubectl PHASE/READY columns)
+K8s::container_images($object)  → { containers, images }          # every {name,image,init} from a Pod or workload (init first, dedup); spec.containers or spec.template.spec.containers
+K8s::condition($object, $type)  → { type, status, reason, message, found, is_true }  # one named status condition (Available/Progressing/PodScheduled/...); found=false when absent
+K8s::age_seconds($object)       → { timestamp, age_seconds }      # age from metadata.creationTimestamp (kubectl AGE); future timestamp clamps to 0
 K8s::owner_refs($object)        → { owners, controller }          # metadata.ownerReferences as {kind,name,uid,controller}; controller is the owning controller or undef
 K8s::diff_merge_patch($from, $to) → \%patch                       # RFC 7386 merge patch turning $from into $to (removed keys → null); the body K8s::patch(type=>"merge") needs
 K8s::drain_filter(@pods)        → { evictable, skipped }          # classify Pod objects for a node drain (skips mirror/DaemonSet/terminated); kubectl drain eligibility rules
@@ -327,6 +332,8 @@ K8s::version          %opts → \%info        # gitVersion, platform, etc.
 K8s::ping             %opts → 1 | ""
 K8s::contexts         %opts → @{ {name, cluster, user, namespace, current} }
 K8s::current_context  %opts → $name
+K8s::healthz          %opts → { ok, path, body }   # probe /livez|/readyz|/healthz; opts: path (default readyz); ok=false (not die) on failure
+K8s::raw              $path, %opts → { path, method, status, body, json }  # raw GET|DELETE against any apiserver path; opts: method (default GET)
 K8s::pkg_version()    → $version_string    # cdylib's CARGO_PKG_VERSION
 ```
 
@@ -337,12 +344,13 @@ Each `K8s::*` wrapper builds a JSON args dict and calls a sibling
 is dlopened in-process on first `use K8s` (via stryke's
 `pkg::commands::try_load_ffi_for` resolver hook). Its exports cover
 version/discovery, get/list (get / get_one / get_yaml / exists / nodes), write
-paths (create / replace / apply / delete / delete_collection / scale / patch),
+paths (create / replace / apply / delete / delete_collection / scale / get_scale / patch),
 rollouts (set_image / rollout_restart / rollout_status /
 rollout_history / autoscale / label / annotate), node scheduling (cordon /
 uncordon / taint / untaint / evict), events,
-metrics (top_pods / top_nodes), wait, snapshot logs, plus cluster-free
-helpers (valid_name / valid_label_value / valid_label_key / parse_selector / build_selector / parse_field_selector / build_field_selector / selector_matches / field_selector_matches / parse_resource_ref / build_resource_ref / parse_gvk / build_gvk / parse_api_version / build_api_version / parse_image_ref / build_image_ref / parse_quantity / format_quantity / compare_quantity / sum_quantities / sub_quantity / scale_quantity / resource_ratio / pod_status / owner_refs / diff_merge_patch / drain_filter). The
+metrics (top_pods / top_nodes), wait, snapshot logs, raw HTTP (raw / healthz),
+plus cluster-free
+helpers (valid_name / valid_label_value / valid_label_key / parse_selector / build_selector / parse_field_selector / build_field_selector / selector_matches / field_selector_matches / parse_resource_ref / build_resource_ref / parse_gvk / build_gvk / parse_api_version / build_api_version / parse_image_ref / build_image_ref / parse_quantity / format_quantity / normalize_quantity / compare_quantity / sum_quantities / sub_quantity / scale_quantity / resource_ratio / pod_status / container_images / condition / age_seconds / owner_refs / diff_merge_patch / drain_filter). The
 authoritative list is `[ffi].exports` in `stryke.toml`.
 
 **Persistent state:**

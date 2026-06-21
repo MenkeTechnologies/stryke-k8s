@@ -92,4 +92,13 @@ assert_ok exists &K8s::owner_refs, "K8s::owner_refs exists"
 assert_ok exists &K8s::diff_merge_patch, "K8s::diff_merge_patch exists"
 assert_ok exists &K8s::drain_filter, "K8s::drain_filter exists"
 
+# ── K8s.stk surface expansion (raw/health/scale + pure helpers) ──────
+assert_ok exists &K8s::raw, "K8s::raw exists"
+assert_ok exists &K8s::healthz, "K8s::healthz exists"
+assert_ok exists &K8s::get_scale, "K8s::get_scale exists"
+assert_ok exists &K8s::normalize_quantity, "K8s::normalize_quantity exists"
+assert_ok exists &K8s::container_images, "K8s::container_images exists"
+assert_ok exists &K8s::condition, "K8s::condition exists"
+assert_ok exists &K8s::age_seconds, "K8s::age_seconds exists"
+
 test_run

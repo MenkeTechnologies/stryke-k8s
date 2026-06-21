@@ -74,6 +74,13 @@ exports = [
     "k8s__owner_refs",
     "k8s__diff_merge_patch",
     "k8s__drain_filter",
+    "k8s__raw",
+    "k8s__healthz",
+    "k8s__get_scale",
+    "k8s__normalize_quantity",
+    "k8s__container_images",
+    "k8s__condition",
+    "k8s__age_seconds",
 ]
 
 [scripts]
