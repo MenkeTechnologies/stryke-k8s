@@ -77,11 +77,11 @@ p K8s::current_context()
 p K8s::version()->{gitVersion}
 
 # List — `kind` accepts short forms or strict GVK.
-my @pods   = K8s::get "pods",  namespace => "default"
-my @deploy = K8s::get "apps/v1/Deployment", namespace => "kube-system"
+val @pods   = K8s::get "pods",  namespace => "default"
+val @deploy = K8s::get "apps/v1/Deployment", namespace => "kube-system"
 
 # Get one.
-my $pod = K8s::get_one "pod", "echo-7d9f", namespace => "default"
+val $pod = K8s::get_one "pod", "echo-7d9f", namespace => "default"
 
 # Server-side apply (full doc; idempotent).
 K8s::apply {
@@ -109,17 +109,17 @@ K8s::apply {
 K8s::scale "deploy", "echo", 5, namespace => "ci"
 
 # Logs (buffered).
-my $text = K8s::logs "echo-7d9f", namespace => "ci", tail => 100
+val $text = K8s::logs "echo-7d9f", namespace => "ci", tail => 100
 
 # Logs (streaming).
 K8s::logs_follow "echo-7d9f",
     namespace => "ci",
-    callback  => sub ($line) { p $line }
+    callback  => fn ($line) { p $line }
 
 # Watch — NDJSON of `{type, object}` events, one per change.
 K8s::watch "pods",
     namespace => "ci",
-    callback  => sub ($evt) {
+    callback  => fn ($evt) {
         return unless defined $evt->{object}
         p "$evt->{type} $evt->{object}{metadata}{name}"
     }
@@ -127,7 +127,7 @@ K8s::watch "pods",
 # Exec inside a container.
 K8s::exec "echo-7d9f", ["sh", "-c", "uptime"],
     namespace => "ci",
-    callback  => sub ($stream, $data) { print $data }
+    callback  => fn ($stream, $data) { print $data }
 
 # Delete (cascading on Namespace).
 K8s::delete_resource "namespace", "ci"
@@ -140,7 +140,7 @@ K8s::delete_resource "namespace", "ci"
 Per-call connection overrides on every public fn:
 
 ```stryke
-my %prod = (context => "prod-eks")
+val %prod = (context => "prod-eks")
 K8s::get "pods", namespace => "payments", %prod
 ```
 
