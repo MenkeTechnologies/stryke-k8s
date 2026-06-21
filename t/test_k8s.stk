@@ -275,4 +275,92 @@ assert_eq K8s::compare_quantity(K8s::scale_quantity("256Mi", 4)->{quantity}, "1G
     "scale_quantity: 256Mi×4 equals 1Gi"
 assert_dies fn { K8s::scale_quantity("100Xi", 2) }, "scale_quantity: rejects an unknown suffix"
 
+# parse_gvk: GroupVersionKind triple / two-part / bare forms.
+val $gvk = K8s::parse_gvk("apps/v1/Deployment")
+assert_eq $gvk->{group},   "apps",       "parse_gvk: group"
+assert_eq $gvk->{version}, "v1",         "parse_gvk: version"
+assert_eq $gvk->{kind},    "Deployment", "parse_gvk: kind"
+assert_eq $gvk->{core},    0,            "parse_gvk: grouped is not core"
+assert_eq K8s::parse_gvk("v1/Pod")->{core}, 1,    "parse_gvk: version/kind is the core group"
+assert_eq K8s::parse_gvk("Pod")->{kind},    "Pod", "parse_gvk: bare kind"
+assert_dies fn { K8s::parse_gvk("a/b/c/d") }, "parse_gvk: rejects more than three segments"
+assert_dies fn { K8s::parse_gvk("apps/v1/") }, "parse_gvk: rejects an empty kind"
+
+# build_gvk: inverse of parse_gvk.
+assert_eq K8s::build_gvk("Deployment", "v1", "apps")->{gvk}, "apps/v1/Deployment", "build_gvk: full triple"
+assert_eq K8s::build_gvk("Pod", "v1")->{gvk}, "v1/Pod", "build_gvk: version/kind"
+assert_eq K8s::build_gvk("Pod")->{gvk}, "Pod", "build_gvk: bare kind"
+val $pgvk = K8s::parse_gvk("batch/v1/Job")
+assert_eq K8s::build_gvk($pgvk->{kind}, $pgvk->{version}, $pgvk->{group})->{gvk}, "batch/v1/Job", "build_gvk: round-trips parse_gvk"
+assert_dies fn { K8s::build_gvk("") }, "build_gvk: rejects an empty kind"
+
+# parse_image_ref: registry / repository / tag / digest split.
+val $img = K8s::parse_image_ref("registry.example.com:5000/team/app:v2")
+assert_eq $img->{registry},   "registry.example.com:5000", "parse_image_ref: registry host with port"
+assert_eq $img->{repository}, "team/app",                  "parse_image_ref: repository path"
+assert_eq $img->{tag},        "v2",                        "parse_image_ref: tag (not the registry port)"
+assert_eq K8s::parse_image_ref("nginx:1.27")->{registry}, "", "parse_image_ref: Hub short name has no registry"
+val $dg = K8s::parse_image_ref('nginx@sha256:abc123')
+assert_eq $dg->{digest}, "sha256:abc123", "parse_image_ref: digest split off"
+
+# build_image_ref: inverse of parse_image_ref.
+assert_eq K8s::build_image_ref("nginx", tag => "1.27")->{image}, "nginx:1.27", "build_image_ref: repository + tag"
+assert_eq K8s::build_image_ref("p/img", registry => "gcr.io", tag => "1.0", digest => 'sha256:def')->{image}, 'gcr.io/p/img:1.0@sha256:def', "build_image_ref: all parts"
+val $pimg = K8s::parse_image_ref("registry.example.com:5000/team/app:v2")
+assert_eq K8s::build_image_ref($pimg->{repository}, registry => $pimg->{registry}, tag => $pimg->{tag})->{image}, "registry.example.com:5000/team/app:v2", "build_image_ref: round-trips parse_image_ref"
+
+# resource_ratio: utilization percentage across units.
+assert_eq K8s::resource_ratio("512Mi", "1Gi")->{percent}, 50,  "resource_ratio: 512Mi of 1Gi = 50%"
+assert_eq K8s::resource_ratio("250m", "1")->{percent},    25,  "resource_ratio: 250m of 1 core = 25%"
+assert_eq K8s::resource_ratio("2Gi", "1Gi")->{percent},   200, "resource_ratio: over-commit reported faithfully"
+assert_dies fn { K8s::resource_ratio("1Gi", "0") }, "resource_ratio: rejects a zero total"
+
+# pod_status: readiness summary from a Pod object.
+val %podobj = (status => {
+    phase => "Running",
+    conditions => [ { type => "Ready", status => "True" } ],
+    containerStatuses => [
+        { ready => true,  restartCount => 2 },
+        { ready => false, restartCount => 5 },
+    ],
+})
+val $ps = K8s::pod_status(\%podobj)
+assert_eq $ps->{phase},            "Running", "pod_status: phase"
+assert_ok $ps->{ready},                       "pod_status: Ready condition true"
+assert_eq $ps->{ready_containers}, 1,         "pod_status: ready container count"
+assert_eq $ps->{total_containers}, 2,         "pod_status: total container count"
+assert_eq $ps->{restarts},         7,         "pod_status: summed restarts"
+
+# owner_refs: extract ownerReferences and flag the controller.
+val %ownerobj = (metadata => { ownerReferences => [
+    { kind => "ReplicaSet", name => "web-abc", uid => "u1", controller => true },
+    { kind => "Foo", name => "bar", uid => "u2" },
+] })
+val $owner = K8s::owner_refs(\%ownerobj)
+assert_eq scalar(@{ $owner->{owners} }), 2,         "owner_refs: two owners"
+assert_eq $owner->{controller}{name}, "web-abc",    "owner_refs: controller identified"
+assert_eq $owner->{owners}[1]{controller}, 0,       "owner_refs: missing controller flag reads false"
+
+# diff_merge_patch: RFC 7386 merge patch from $from to $to.
+val %from = (metadata => { labels => { app => "web", tier => "frontend" } }, spec => { replicas => 2, paused => \0 })
+val %to   = (metadata => { labels => { app => "web", tier => "backend", env => "prod" } }, spec => { replicas => 3 })
+val $patch = K8s::diff_merge_patch(\%from, \%to)
+assert_eq $patch->{metadata}{labels}{tier}, "backend", "diff_merge_patch: changed nested value"
+assert_eq $patch->{metadata}{labels}{env},  "prod",    "diff_merge_patch: added nested key"
+assert_eq $patch->{spec}{replicas},         3,         "diff_merge_patch: changed scalar"
+assert_ok !defined($patch->{spec}{paused}),            "diff_merge_patch: removed key becomes null"
+
+# drain_filter: classify pods for a node drain (kubectl eligibility rules).
+val @drainpods = (
+    { metadata => { name => "web-1", namespace => "default" }, status => { phase => "Running" } },
+    { metadata => { name => "kube-proxy-x", namespace => "kube-system", ownerReferences => [ { kind => "DaemonSet", name => "kube-proxy" } ] }, status => { phase => "Running" } },
+    { metadata => { name => "static-pod", namespace => "kube-system", annotations => { "kubernetes.io/config.mirror" => "abc" } }, status => { phase => "Running" } },
+    { metadata => { name => "job-done", namespace => "default" }, status => { phase => "Succeeded" } },
+)
+val $drain = K8s::drain_filter(@drainpods)
+assert_eq scalar(@{ $drain->{evictable} }), 1,           "drain_filter: only the plain Running pod is evictable"
+assert_eq $drain->{evictable}[0]{name}, "web-1",         "drain_filter: evictable pod name"
+assert_eq scalar(@{ $drain->{skipped} }), 3,             "drain_filter: three pods skipped"
+assert_eq $drain->{skipped}[0]{reason}, "DaemonSet-managed", "drain_filter: DaemonSet reason"
+
 test_run

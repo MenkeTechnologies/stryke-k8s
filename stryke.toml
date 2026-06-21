@@ -61,6 +61,19 @@ exports = [
     "k8s__sum_quantities",
     "k8s__sub_quantity",
     "k8s__scale_quantity",
+    "k8s__nodes",
+    "k8s__exists",
+    "k8s__delete_collection",
+    "k8s__get_yaml",
+    "k8s__parse_gvk",
+    "k8s__build_gvk",
+    "k8s__parse_image_ref",
+    "k8s__build_image_ref",
+    "k8s__resource_ratio",
+    "k8s__pod_status",
+    "k8s__owner_refs",
+    "k8s__diff_merge_patch",
+    "k8s__drain_filter",
 ]
 
 [scripts]

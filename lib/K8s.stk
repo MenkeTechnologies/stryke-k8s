@@ -102,6 +102,31 @@ fn K8s::get_one ($kind, $name, %opts) {
     K8s::_decode("get_one", k8s__get_one(to_json($r)))
 }
 
+## Fetch one resource by $kind + $name and return it as a YAML manifest string —
+## `kubectl get $kind $name -o yaml`. Round-trips back through K8s::apply.
+fn K8s::get_yaml ($kind, $name, %opts) {
+    val $r = K8s::_req(
+        { kind => $kind, name => $name, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("get_yaml", k8s__get_yaml(to_json($r)))->{yaml}
+}
+
+## Does $kind/$name exist? Returns 1/0 without fetching the object body.
+fn K8s::exists ($kind, $name, %opts) {
+    val $r = K8s::_req(
+        { kind => $kind, name => $name, namespace => $opts{namespace} },
+        \%opts
+    )
+    K8s::_decode("exists", k8s__exists(to_json($r)))->{exists} ? 1 : 0
+}
+
+## List Nodes with a compact status summary — the `kubectl get nodes` columns:
+## { name, ready, schedulable, roles, version }. Cluster-scoped.
+fn K8s::nodes (%opts) {
+    @{ K8s::_decode("nodes", k8s__nodes(to_json(K8s::_req({}, \%opts))))->{nodes} }
+}
+
 # ── write paths ─────────────────────────────────────────────────────
 
 ## Apply a YAML/JSON doc as `create` semantics.
@@ -129,6 +154,19 @@ fn K8s::delete_resource ($kind, $name, %opts) {
         \%opts
     )
     K8s::_decode("delete", k8s__delete(to_json($r)))
+}
+
+## Delete every $kind matching a selector in one call — `kubectl delete $kind
+## -l app=web`. opts: label_selector, field_selector, namespace. Returns the
+## result hashref { deleted, pending } (deleted = count removed).
+fn K8s::delete_collection ($kind, %opts) {
+    val $r = K8s::_req(
+        { kind => $kind, namespace => $opts{namespace},
+          label_selector => $opts{label_selector},
+          field_selector => $opts{field_selector} },
+        \%opts
+    )
+    K8s::_decode("delete_collection", k8s__delete_collection(to_json($r)))
 }
 
 ## Patch $kind $name with $patch (a hashref). opts: type (merge|strategic,
@@ -488,5 +526,76 @@ fn K8s::sub_quantity ($a, $b, $suffix = undef) {
 fn K8s::scale_quantity ($quantity, $factor, $suffix = undef) {
     K8s::_decode("scale_quantity",
         k8s__scale_quantity(to_json({ quantity => $quantity, factor => $factor, suffix => $suffix })))
+}
+
+## Parse a GroupVersionKind ref into { gvk, group, version, kind, core }. Accepts
+## the triple "apps/v1/Deployment", the core two-part "v1/Pod", and the bare
+## "Pod"; a leading "/" gives the core group ("/v1/Pod"). The kind is required.
+fn K8s::parse_gvk ($gvk) {
+    K8s::_decode("parse_gvk", k8s__parse_gvk(to_json({ gvk => $gvk })))
+}
+
+## Assemble a GroupVersionKind ref from parts — inverse of parse_gvk. With a
+## $group it emits "group/version/kind"; with only $version, "version/kind";
+## with neither, the bare $kind. A $group requires a $version; $kind is required;
+## no part may contain "/". Returns { gvk, group, version, kind, core }.
+fn K8s::build_gvk ($kind, $version = undef, $group = undef) {
+    K8s::_decode("build_gvk",
+        k8s__build_gvk(to_json({ kind => $kind, version => $version, group => $group })))
+}
+
+## Parse a container image ref into { image, registry, repository, tag, digest }.
+## The first path segment is a registry only when it looks like a host (has a "."
+## or ":", or is "localhost") — so "nginx:1.27" has no registry and a registry
+## port (":5000") is never read as a tag. A "@sha256:..." digest is split off.
+fn K8s::parse_image_ref ($image) {
+    K8s::_decode("parse_image_ref", k8s__parse_image_ref(to_json({ image => $image })))
+}
+
+## Assemble a container image ref from parts — inverse of parse_image_ref.
+## $registry (if set) is prefixed with "/", $tag appended after ":", $digest
+## after "@". $repository is required. Returns { image, registry, repository,
+## tag, digest }.
+fn K8s::build_image_ref ($repository, %opts) {
+    K8s::_decode("build_image_ref", k8s__build_image_ref(to_json(
+        { repository => $repository, registry => $opts{registry},
+          tag => $opts{tag}, digest => $opts{digest} })))
+}
+
+## Express one resource quantity as a percentage of another — utilization
+## ($used / $total × 100), across unit suffixes (512Mi of 1Gi → 50). $total must
+## be non-zero. Returns { used, total, used_value, total_value, ratio, percent }.
+fn K8s::resource_ratio ($used, $total) {
+    K8s::_decode("resource_ratio", k8s__resource_ratio(to_json({ used => $used, total => $total })))
+}
+
+## Summarize a Pod object's readiness from a Pod hashref you already hold (e.g.
+## from get/get_one) — the PHASE/READY columns of `kubectl get pods`. Returns
+## { phase, ready, ready_containers, total_containers, restarts }.
+fn K8s::pod_status ($pod) {
+    K8s::_decode("pod_status", k8s__pod_status(to_json({ pod => $pod })))
+}
+
+## Extract an object's metadata.ownerReferences as { owners, controller } —
+## owners is a list of { kind, name, uid, controller }; controller is the owning
+## controller (controller => true) or undef. Pure; takes any object hashref.
+fn K8s::owner_refs ($object) {
+    K8s::_decode("owner_refs", k8s__owner_refs(to_json({ object => $object })))
+}
+
+## Compute the RFC 7386 JSON merge patch that turns $from into $to — the body
+## K8s::patch(type => "merge") would need. Changed/added keys carry their new
+## value, removed keys become null, unchanged keys are omitted; nested objects
+## recurse, arrays/scalars replace wholesale. Returns the patch hashref.
+fn K8s::diff_merge_patch ($from, $to) {
+    K8s::_decode("diff_merge_patch", k8s__diff_merge_patch(to_json({ from => $from, to => $to })))->{patch}
+}
+
+## Classify a list of Pod objects (@pods) for a node drain — kubectl's drain
+## eligibility rules applied locally. Mirror/static pods, DaemonSet-managed pods,
+## and already-terminated pods are skipped; everything else is evictable. Returns
+## { evictable, skipped } where each entry is { name, namespace, reason? }.
+fn K8s::drain_filter (@pods) {
+    K8s::_decode("drain_filter", k8s__drain_filter(to_json({ pods => \@pods })))
 }
 

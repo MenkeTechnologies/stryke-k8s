@@ -375,6 +375,112 @@ async fn op_logs(opts: Value) -> Result<Value> {
     Ok(json!({"logs": text}))
 }
 
+/// List Nodes with a compact per-node status summary (the columns `kubectl get
+/// nodes` shows): name, Ready condition, schedulable flag, roles (from
+/// `node-role.kubernetes.io/*` labels), and kubelet version. The full Node
+/// objects are heavy; this returns just what a scheduling/health check needs.
+async fn op_nodes(opts: Value) -> Result<Value> {
+    let c = get_client(&opts).await?;
+    let api: Api<k8s_openapi::api::core::v1::Node> = Api::all(c);
+    let list = api.list(&ListParams::default()).await?;
+    let nodes: Vec<Value> = list
+        .items
+        .into_iter()
+        .map(|n| {
+            let v = to_value(&n);
+            json!({
+                "name": v["metadata"]["name"],
+                "ready": condition_is_true(&v, "Ready"),
+                "schedulable": !is_truthy(&v["spec"]["unschedulable"]),
+                "roles": node_roles(&v),
+                "version": v["status"]["nodeInfo"]["kubeletVersion"],
+            })
+        })
+        .collect();
+    Ok(json!({ "nodes": nodes }))
+}
+
+/// Roles of a Node from its `node-role.kubernetes.io/<role>` labels (kubectl's
+/// ROLES column). Returns the role names, or `["<none>"]` when unlabelled.
+fn node_roles(node: &Value) -> Vec<String> {
+    let mut roles: Vec<String> = node["metadata"]["labels"]
+        .as_object()
+        .map(|labels| {
+            labels
+                .keys()
+                .filter_map(|k| k.strip_prefix("node-role.kubernetes.io/"))
+                .filter(|r| !r.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    roles.sort();
+    if roles.is_empty() {
+        roles.push("<none>".to_string());
+    }
+    roles
+}
+
+/// Cheap existence probe: `{exists: bool}` for $kind/$name without returning the
+/// (possibly large) object — uses `get_opt`, which maps a 404 to `None` instead
+/// of an error, so "absent" is a clean false rather than a thrown error.
+async fn op_exists(opts: Value) -> Result<Value> {
+    let kind = opts["kind"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing kind"))?;
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    let api = api_for(&c, kind, namespace).await?;
+    let found = api.get_opt(name).await?.is_some();
+    Ok(json!({ "exists": found, "kind": kind, "name": name }))
+}
+
+/// Delete every $kind matching a label/field selector in one call — kubectl's
+/// `delete <kind> -l <selector>`. opts: label_selector, field_selector,
+/// namespace. Returns `{deleted: n}` (the count actually removed) plus whether
+/// the server reported the collection delete as still in progress.
+async fn op_delete_collection(opts: Value) -> Result<Value> {
+    let kind = opts["kind"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing kind"))?;
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    let api = api_for(&c, kind, namespace).await?;
+    let mut lp = ListParams::default();
+    if let Some(l) = opts["label_selector"].as_str() {
+        lp = lp.labels(l);
+    }
+    if let Some(f) = opts["field_selector"].as_str() {
+        lp = lp.fields(f);
+    }
+    let result = api.delete_collection(&DeleteParams::default(), &lp).await?;
+    Ok(match result {
+        either::Either::Left(list) => json!({"deleted": list.items.len(), "pending": false}),
+        either::Either::Right(s) => json!({"deleted": 0, "pending": true, "status": to_value(s)}),
+    })
+}
+
+/// Fetch one resource and serialize it as YAML — `kubectl get <kind> <name> -o
+/// yaml`. Same lookup as `get_one`, but the returned `{yaml}` is a ready-to-edit
+/// manifest string (round-trips back through `K8s::apply` after editing).
+async fn op_get_yaml(opts: Value) -> Result<Value> {
+    let kind = opts["kind"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing kind"))?;
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let namespace = opts["namespace"].as_str();
+    let c = get_client(&opts).await?;
+    let api = api_for(&c, kind, namespace).await?;
+    let obj = api.get(name).await?;
+    let yaml = serde_yaml::to_string(&obj)?;
+    Ok(json!({ "yaml": yaml }))
+}
+
 // ── ops: mutation helpers ─────────────────────────────────────────────────────
 
 /// Resolve the dynamic Api handle for a kind + optional namespace in one step.
@@ -632,6 +738,21 @@ async fn op_wait(opts: Value) -> Result<Value> {
             ));
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// Truthiness of a JSON value that crossed the FFI boundary. A live cluster
+/// sends real JSON booleans (`true`), but a hand-built stryke hash marshals a
+/// boolean as the string `"true"` or the number `1` — so a flag field must accept
+/// all three to behave the same on synthetic and real data. Used for fields that
+/// are genuine booleans server-side (`status.containerStatuses[].ready`,
+/// `ownerReferences[].controller`, `spec.unschedulable`).
+fn is_truthy(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::String(s) => s.eq_ignore_ascii_case("true"),
+        Value::Number(n) => n.as_i64() == Some(1) || n.as_f64() == Some(1.0),
+        _ => false,
     }
 }
 
@@ -1647,6 +1768,388 @@ fn op_scale_quantity(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Parse a GroupVersionKind reference into `{group, version, kind, core}` — the
+/// triple form the `kind` arg accepts (`apps/v1/Deployment`,
+/// `networking.k8s.io/v1/Ingress`), plus the core-group two-part (`v1/Pod`) and
+/// bare (`Pod`) forms. The kind is always required; with a leading `/` the group
+/// is the empty (core) group (`/v1/Pod`). More than three `/`-segments, or an
+/// empty version/kind segment, is rejected. opts: `gvk` (or `value`). Pure.
+fn op_parse_gvk(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("gvk")
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing gvk"))?;
+    if raw.is_empty() {
+        return Err(anyhow!("gvk must not be empty"));
+    }
+    let (group, version, kind) = match raw.split('/').collect::<Vec<_>>().as_slice() {
+        [k] => ("", "", *k),
+        [v, k] => ("", *v, *k),
+        [g, v, k] => (*g, *v, *k),
+        _ => {
+            return Err(anyhow!(
+                "invalid gvk `{raw}` (want kind, version/kind, or group/version/kind)"
+            ))
+        }
+    };
+    if kind.is_empty() {
+        return Err(anyhow!("gvk `{raw}` has an empty kind"));
+    }
+    if raw.contains('/') && version.is_empty() {
+        return Err(anyhow!("gvk `{raw}` has an empty version"));
+    }
+    Ok(json!({
+        "gvk": raw,
+        "group": group,
+        "version": version,
+        "kind": kind,
+        "core": group.is_empty(),
+    }))
+}
+
+/// Assemble a GroupVersionKind reference from parts — the inverse of
+/// `parse_gvk`. With a group it emits `group/version/kind` (`apps/v1/Deployment`);
+/// with only a version, `version/kind` (`v1/Pod`); with neither, the bare `kind`.
+/// A group requires a version (you can't have `apps//Deployment`), the kind is
+/// required, and no part may contain a `/`. opts: `group` (optional), `version`
+/// (optional), `kind` (required). Returns `{gvk, group, version, kind, core}`. Pure.
+fn op_build_gvk(opts: Value) -> Result<Value> {
+    let kind = opts
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("missing kind"))?;
+    let version = opts
+        .get("version")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let group = opts
+        .get("group")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    for (label, part) in [("kind", Some(kind)), ("version", version), ("group", group)] {
+        if let Some(p) = part {
+            if p.contains('/') {
+                return Err(anyhow!("{label} must not contain `/`: {p}"));
+            }
+        }
+    }
+    if group.is_some() && version.is_none() {
+        return Err(anyhow!("a group requires a version (group/version/kind)"));
+    }
+    let gvk = match (group, version) {
+        (Some(g), Some(v)) => format!("{g}/{v}/{kind}"),
+        (None, Some(v)) => format!("{v}/{kind}"),
+        (None, None) => kind.to_string(),
+        (Some(_), None) => unreachable!("guarded above"),
+    };
+    Ok(json!({
+        "gvk": gvk,
+        "group": group.unwrap_or(""),
+        "version": version.unwrap_or(""),
+        "kind": kind,
+        "core": group.is_none(),
+    }))
+}
+
+/// Parse a container image reference into `{registry, repository, tag, digest}` —
+/// the same split a kubelet does when pulling. A registry host is recognized only
+/// when the first `/`-segment looks like a host (contains a `.` or `:`, or is
+/// `localhost`); otherwise the reference is a Docker-Hub short name and the
+/// registry is empty (`nginx:1.27` → repository `nginx`). A `@sha256:...` digest
+/// and a `:tag` are split off the final path segment so a port in the registry
+/// host (`:5000`) is never mistaken for a tag. opts: `image` (or `ref`). Pure.
+fn op_parse_image_ref(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("image")
+        .or_else(|| opts.get("ref"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("missing image"))?;
+    // Split the digest first — it is unambiguous (`@`), and a tag may precede it.
+    let (before_digest, digest) = match raw.split_once('@') {
+        Some((b, d)) => (b, Some(d)),
+        None => (raw, None),
+    };
+    // Registry host: the first segment is a host only if it contains `.`/`:`
+    // (domain or port) or is exactly `localhost`. Otherwise it's a Hub namespace.
+    let (registry, remainder) = match before_digest.split_once('/') {
+        Some((first, rest))
+            if first.contains('.') || first.contains(':') || first == "localhost" =>
+        {
+            (first, rest)
+        }
+        _ => ("", before_digest),
+    };
+    // The tag lives on the LAST path segment, after the final `:` — so a registry
+    // port (already peeled into `registry`) can't be read as a tag.
+    let (repository, tag) = match remainder.rsplit_once('/') {
+        Some((path, last)) => match last.split_once(':') {
+            Some((name, t)) => (format!("{path}/{name}"), Some(t)),
+            None => (remainder.to_string(), None),
+        },
+        None => match remainder.split_once(':') {
+            Some((name, t)) => (name.to_string(), Some(t)),
+            None => (remainder.to_string(), None),
+        },
+    };
+    if repository.is_empty() {
+        return Err(anyhow!("image `{raw}` has an empty repository"));
+    }
+    Ok(json!({
+        "image": raw,
+        "registry": registry,
+        "repository": repository,
+        "tag": tag,
+        "digest": digest,
+    }))
+}
+
+/// Assemble a container image reference from parts — the inverse of
+/// `parse_image_ref`. `registry` (if present) is prefixed with a `/`, `tag` is
+/// appended after a `:`, and `digest` after an `@`. `repository` is required.
+/// When both a tag and a digest are given the reference is `repo:tag@digest`
+/// (the digest pins; the tag is informational), matching how registries accept
+/// such refs. opts: `repository` (required), `registry`/`tag`/`digest`
+/// (optional). Returns `{image, registry, repository, tag, digest}`. Pure.
+fn op_build_image_ref(opts: Value) -> Result<Value> {
+    let repository = opts
+        .get("repository")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("missing repository"))?;
+    let registry = opts
+        .get("registry")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let tag = opts
+        .get("tag")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let digest = opts
+        .get("digest")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let mut image = String::new();
+    if let Some(r) = registry {
+        image.push_str(r);
+        image.push('/');
+    }
+    image.push_str(repository);
+    if let Some(t) = tag {
+        image.push(':');
+        image.push_str(t);
+    }
+    if let Some(d) = digest {
+        image.push('@');
+        image.push_str(d);
+    }
+    Ok(json!({
+        "image": image,
+        "registry": registry.unwrap_or(""),
+        "repository": repository,
+        "tag": tag,
+        "digest": digest,
+    }))
+}
+
+/// Express one resource quantity as a percentage of another — the utilization a
+/// `top`/HPA view shows (`used / total × 100`). Both operands resolve through the
+/// same suffix rules as `parse_quantity`, so cross-unit inputs work (`512Mi` of
+/// `1Gi` → 50). `total` must be non-zero. opts: `used` (or `a`), `total` (or
+/// `b`). Returns `{used, total, used_value, total_value, ratio, percent}` where
+/// `ratio` is the raw fraction and `percent` is `ratio × 100`. Pure.
+fn op_resource_ratio(opts: Value) -> Result<Value> {
+    let used = opts
+        .get("used")
+        .or_else(|| opts.get("a"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing used"))?;
+    let total = opts
+        .get("total")
+        .or_else(|| opts.get("b"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing total"))?;
+    let (_, _, uv) = resolve_quantity(used)?;
+    let (_, _, tv) = resolve_quantity(total)?;
+    if tv == 0.0 {
+        return Err(anyhow!("total must be non-zero"));
+    }
+    let ratio = uv / tv;
+    Ok(json!({
+        "used": used.trim(),
+        "total": total.trim(),
+        "used_value": uv,
+        "total_value": tv,
+        "ratio": ratio,
+        "percent": ratio * 100.0,
+    }))
+}
+
+/// Summarize a Pod object's readiness — the PHASE/READY columns of `kubectl get
+/// pods`, computed locally from a Pod hashref you already hold (e.g. from
+/// `get`/`get_one`). Reads `status.phase`, the `Ready` pod condition, and the
+/// per-container `status.containerStatuses[].ready` to produce `ready`/`total`
+/// container counts and a `restarts` sum. opts: `pod` (or `object`), the Pod
+/// object. Returns `{phase, ready, ready_containers, total_containers, restarts}`.
+/// Pure.
+fn op_pod_status(opts: Value) -> Result<Value> {
+    let pod = opts
+        .get("pod")
+        .or_else(|| opts.get("object"))
+        .filter(|v| v.is_object())
+        .ok_or_else(|| anyhow!("missing pod (a Pod object)"))?;
+    let statuses = pod["status"]["containerStatuses"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let total = statuses.len();
+    let ready_containers = statuses.iter().filter(|cs| is_truthy(&cs["ready"])).count();
+    let restarts: i64 = statuses
+        .iter()
+        .map(|cs| cs["restartCount"].as_i64().unwrap_or(0))
+        .sum();
+    Ok(json!({
+        "phase": pod["status"]["phase"],
+        "ready": condition_is_true(pod, "Ready"),
+        "ready_containers": ready_containers,
+        "total_containers": total,
+        "restarts": restarts,
+    }))
+}
+
+/// Extract an object's `metadata.ownerReferences` as a tidy list and flag the
+/// controller — the link `kubectl` follows from a Pod up to its ReplicaSet and on
+/// to its Deployment. Each entry is `{kind, name, uid, controller}`; the
+/// `controller` flag marks the single owning controller (the one with
+/// `controller: true`). opts: `object` (or `pod`), any object hashref. Returns
+/// `{owners, controller}` where `controller` is the controlling owner or null.
+/// Pure.
+fn op_owner_refs(opts: Value) -> Result<Value> {
+    let object = opts
+        .get("object")
+        .or_else(|| opts.get("pod"))
+        .filter(|v| v.is_object())
+        .ok_or_else(|| anyhow!("missing object"))?;
+    let refs = object["metadata"]["ownerReferences"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let owners: Vec<Value> = refs
+        .iter()
+        .map(|r| {
+            json!({
+                "kind": r["kind"],
+                "name": r["name"],
+                "uid": r["uid"],
+                "controller": is_truthy(&r["controller"]),
+            })
+        })
+        .collect();
+    let controller = owners
+        .iter()
+        .find(|o| o["controller"] == json!(true))
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(json!({ "owners": owners, "controller": controller }))
+}
+
+/// Compute the RFC 7386 JSON merge patch that turns `from` into `to` — the patch
+/// body `K8s::patch(..., type => "merge")` would need to reconcile one object to
+/// another. Keys changed or added in `to` appear with their new value; keys
+/// removed in `to` appear as `null` (merge-patch deletion); unchanged keys are
+/// omitted. Recurses into nested objects; arrays and scalars are replaced
+/// wholesale (merge-patch has no array merging). opts: `from`, `to` (both
+/// objects). Returns `{patch}`. Pure.
+fn op_diff_merge_patch(opts: Value) -> Result<Value> {
+    let from = opts
+        .get("from")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| anyhow!("missing from (an object)"))?;
+    let to = opts
+        .get("to")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| anyhow!("missing to (an object)"))?;
+    Ok(json!({ "patch": merge_patch_diff(from, to) }))
+}
+
+/// Recursive RFC 7386 merge-patch diff: the value that, merged into `from`,
+/// yields `to`. Objects recurse; everything else (arrays, scalars) replaces
+/// wholesale. Removed keys become `null`.
+fn merge_patch_diff(from: &Value, to: &Value) -> Value {
+    match (from, to) {
+        (Value::Object(fo), Value::Object(tobj)) => {
+            let mut patch = serde_json::Map::new();
+            // Keys present in `to`: add when new/changed, recurse for nested objects.
+            for (k, tv) in tobj {
+                match fo.get(k) {
+                    Some(fv) if fv == tv => {}
+                    Some(fv) if fv.is_object() && tv.is_object() => {
+                        let sub = merge_patch_diff(fv, tv);
+                        if !sub.as_object().is_some_and(serde_json::Map::is_empty) {
+                            patch.insert(k.clone(), sub);
+                        }
+                    }
+                    _ => {
+                        patch.insert(k.clone(), tv.clone());
+                    }
+                }
+            }
+            // Keys dropped in `to` are deleted with an explicit null.
+            for k in fo.keys() {
+                if !tobj.contains_key(k) {
+                    patch.insert(k.clone(), Value::Null);
+                }
+            }
+            Value::Object(patch)
+        }
+        _ => to.clone(),
+    }
+}
+
+/// Classify a list of pods for a node drain — kubectl's drain eligibility rules,
+/// applied locally so a script can preview what `K8s::evict` would touch. A pod
+/// is NOT evictable when it is a static/mirror pod (the
+/// `kubernetes.io/config.mirror` annotation), is owned by a DaemonSet, or has
+/// already terminated (`status.phase` Succeeded/Failed). Everything else is
+/// evictable. opts: `pods` (an array of Pod objects). Returns `{evictable,
+/// skipped}` — each entry `{name, namespace, reason?}` (reason set only on
+/// skipped). Pure.
+fn op_drain_filter(opts: Value) -> Result<Value> {
+    let pods = opts
+        .get("pods")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing pods (array of Pod objects)"))?;
+    let mut evictable = Vec::new();
+    let mut skipped = Vec::new();
+    for pod in pods {
+        let name = pod["metadata"]["name"].clone();
+        let namespace = pod["metadata"]["namespace"].clone();
+        let is_mirror = pod["metadata"]["annotations"]["kubernetes.io/config.mirror"].is_string();
+        let owned_by_ds = pod["metadata"]["ownerReferences"]
+            .as_array()
+            .is_some_and(|refs| refs.iter().any(|r| r["kind"] == json!("DaemonSet")));
+        let phase = pod["status"]["phase"].as_str().unwrap_or("");
+        let terminated = phase == "Succeeded" || phase == "Failed";
+        let reason = if is_mirror {
+            Some("mirror pod")
+        } else if owned_by_ds {
+            Some("DaemonSet-managed")
+        } else if terminated {
+            Some("already terminated")
+        } else {
+            None
+        };
+        match reason {
+            Some(r) => skipped.push(json!({"name": name, "namespace": namespace, "reason": r})),
+            None => evictable.push(json!({"name": name, "namespace": namespace})),
+        }
+    }
+    Ok(json!({ "evictable": evictable, "skipped": skipped }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1899,6 +2402,71 @@ pub extern "C" fn k8s__sub_quantity(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn k8s__scale_quantity(args: *const c_char) -> *const c_char {
     ffi_call_async(args, |opts| async move { op_scale_quantity(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__nodes(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_nodes)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__exists(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_exists)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__delete_collection(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_delete_collection)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__get_yaml(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, op_get_yaml)
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__parse_gvk(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_parse_gvk(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__build_gvk(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_build_gvk(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__parse_image_ref(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_parse_image_ref(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__build_image_ref(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_build_image_ref(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__resource_ratio(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_resource_ratio(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__pod_status(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_pod_status(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__owner_refs(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_owner_refs(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__diff_merge_patch(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_diff_merge_patch(opts) })
+}
+
+#[no_mangle]
+pub extern "C" fn k8s__drain_filter(args: *const c_char) -> *const c_char {
+    ffi_call_async(args, |opts| async move { op_drain_filter(opts) })
 }
 
 #[cfg(test)]
@@ -3137,5 +3705,359 @@ mod tests {
         assert!(op_scale_quantity(json!({"factor": 2})).is_err());
         assert!(op_scale_quantity(json!({"quantity": "2Gi"})).is_err());
         assert!(op_scale_quantity(json!({"quantity": "100Xi", "factor": 2})).is_err());
+    }
+
+    #[test]
+    fn parse_gvk_handles_all_three_forms() {
+        // Full triple.
+        let d = op_parse_gvk(json!({"gvk": "apps/v1/Deployment"})).unwrap();
+        assert_eq!(d["group"], json!("apps"));
+        assert_eq!(d["version"], json!("v1"));
+        assert_eq!(d["kind"], json!("Deployment"));
+        assert_eq!(d["core"], json!(false));
+        // Dotted group.
+        let i = op_parse_gvk(json!({"gvk": "networking.k8s.io/v1/Ingress"})).unwrap();
+        assert_eq!(i["group"], json!("networking.k8s.io"));
+        assert_eq!(i["kind"], json!("Ingress"));
+        // version/kind → core group.
+        let p = op_parse_gvk(json!({"gvk": "v1/Pod"})).unwrap();
+        assert_eq!(p["group"], json!(""));
+        assert_eq!(p["version"], json!("v1"));
+        assert_eq!(p["kind"], json!("Pod"));
+        assert_eq!(p["core"], json!(true));
+        // Bare kind — no group, no version.
+        let b = op_parse_gvk(json!({"gvk": "Pod"})).unwrap();
+        assert_eq!(b["version"], json!(""));
+        assert_eq!(b["kind"], json!("Pod"));
+        assert_eq!(b["core"], json!(true));
+        // `value` alias and a leading-slash core form.
+        assert_eq!(
+            op_parse_gvk(json!({"value": "batch/v1/Job"})).unwrap()["kind"],
+            json!("Job")
+        );
+        let lead = op_parse_gvk(json!({"gvk": "/v1/Pod"})).unwrap();
+        assert_eq!(lead["group"], json!(""));
+        assert_eq!(lead["kind"], json!("Pod"));
+        // Errors: empty, too many segments, empty kind, empty version.
+        assert!(op_parse_gvk(json!({"gvk": ""})).is_err());
+        assert!(op_parse_gvk(json!({"gvk": "a/b/c/d"})).is_err());
+        assert!(op_parse_gvk(json!({"gvk": "apps/v1/"})).is_err());
+        assert!(op_parse_gvk(json!({"gvk": "apps//Deployment"})).is_err());
+        assert!(op_parse_gvk(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_gvk_inverts_parse_gvk() {
+        assert_eq!(
+            op_build_gvk(json!({"group": "apps", "version": "v1", "kind": "Deployment"})).unwrap()
+                ["gvk"],
+            json!("apps/v1/Deployment")
+        );
+        assert_eq!(
+            op_build_gvk(json!({"version": "v1", "kind": "Pod"})).unwrap()["gvk"],
+            json!("v1/Pod")
+        );
+        assert_eq!(
+            op_build_gvk(json!({"kind": "Pod"})).unwrap()["gvk"],
+            json!("Pod")
+        );
+        // Round-trips parse_gvk on every form.
+        for g in ["apps/v1/Deployment", "v1/Pod", "Pod", "batch/v1/Job"] {
+            let p = op_parse_gvk(json!({ "gvk": g })).unwrap();
+            let rebuilt = op_build_gvk(json!({
+                "group": p["group"], "version": p["version"], "kind": p["kind"],
+            }))
+            .unwrap();
+            assert_eq!(rebuilt["gvk"], json!(g), "round-trip {g}");
+        }
+        // Errors: missing kind, group-without-version, a `/` in any part.
+        assert!(op_build_gvk(json!({})).is_err());
+        assert!(op_build_gvk(json!({"kind": ""})).is_err());
+        assert!(op_build_gvk(json!({"group": "apps", "kind": "Deployment"})).is_err());
+        assert!(op_build_gvk(json!({"kind": "a/b"})).is_err());
+        assert!(op_build_gvk(json!({"group": "a/b", "version": "v1", "kind": "X"})).is_err());
+    }
+
+    #[test]
+    fn parse_image_ref_splits_registry_tag_digest() {
+        // Docker-Hub short name: no registry.
+        let n = op_parse_image_ref(json!({"image": "nginx:1.27"})).unwrap();
+        assert_eq!(n["registry"], json!(""));
+        assert_eq!(n["repository"], json!("nginx"));
+        assert_eq!(n["tag"], json!("1.27"));
+        assert_eq!(n["digest"], Value::Null);
+        // Hub namespace path is NOT a registry (no dot/colon in first segment).
+        let lib = op_parse_image_ref(json!({"image": "library/redis:7"})).unwrap();
+        assert_eq!(lib["registry"], json!(""));
+        assert_eq!(lib["repository"], json!("library/redis"));
+        assert_eq!(lib["tag"], json!("7"));
+        // A real registry host with a port — the port is NOT a tag.
+        let r =
+            op_parse_image_ref(json!({"image": "registry.example.com:5000/team/app:v2"})).unwrap();
+        assert_eq!(r["registry"], json!("registry.example.com:5000"));
+        assert_eq!(r["repository"], json!("team/app"));
+        assert_eq!(r["tag"], json!("v2"));
+        // localhost is a recognized registry host.
+        assert_eq!(
+            op_parse_image_ref(json!({"image": "localhost/foo:dev"})).unwrap()["registry"],
+            json!("localhost")
+        );
+        // Digest (with and without a tag).
+        let dg = op_parse_image_ref(json!({"image": "nginx@sha256:abc123"})).unwrap();
+        assert_eq!(dg["repository"], json!("nginx"));
+        assert_eq!(dg["tag"], Value::Null);
+        assert_eq!(dg["digest"], json!("sha256:abc123"));
+        let both = op_parse_image_ref(json!({"image": "gcr.io/p/img:1.0@sha256:def"})).unwrap();
+        assert_eq!(both["registry"], json!("gcr.io"));
+        assert_eq!(both["repository"], json!("p/img"));
+        assert_eq!(both["tag"], json!("1.0"));
+        assert_eq!(both["digest"], json!("sha256:def"));
+        // No tag, no digest.
+        assert_eq!(
+            op_parse_image_ref(json!({"image": "busybox"})).unwrap()["repository"],
+            json!("busybox")
+        );
+        // `ref` alias; errors on empty/missing.
+        assert_eq!(
+            op_parse_image_ref(json!({"ref": "alpine:3.20"})).unwrap()["repository"],
+            json!("alpine")
+        );
+        assert!(op_parse_image_ref(json!({})).is_err());
+        assert!(op_parse_image_ref(json!({"image": "  "})).is_err());
+    }
+
+    #[test]
+    fn build_image_ref_inverts_parse_image_ref() {
+        assert_eq!(
+            op_build_image_ref(json!({"repository": "nginx", "tag": "1.27"})).unwrap()["image"],
+            json!("nginx:1.27")
+        );
+        assert_eq!(
+            op_build_image_ref(json!({
+                "registry": "gcr.io", "repository": "p/img", "tag": "1.0", "digest": "sha256:def",
+            }))
+            .unwrap()["image"],
+            json!("gcr.io/p/img:1.0@sha256:def")
+        );
+        // Bare repository.
+        assert_eq!(
+            op_build_image_ref(json!({"repository": "busybox"})).unwrap()["image"],
+            json!("busybox")
+        );
+        // Round-trips parse_image_ref on representative refs.
+        for img in [
+            "nginx:1.27",
+            "library/redis:7",
+            "registry.example.com:5000/team/app:v2",
+            "gcr.io/p/img:1.0@sha256:def",
+            "busybox",
+        ] {
+            let p = op_parse_image_ref(json!({ "image": img })).unwrap();
+            let rebuilt = op_build_image_ref(json!({
+                "registry": p["registry"],
+                "repository": p["repository"],
+                "tag": p["tag"],
+                "digest": p["digest"],
+            }))
+            .unwrap();
+            assert_eq!(rebuilt["image"], json!(img), "round-trip {img}");
+        }
+        assert!(op_build_image_ref(json!({})).is_err());
+        assert!(op_build_image_ref(json!({"repository": ""})).is_err());
+    }
+
+    #[test]
+    fn resource_ratio_computes_percent_across_units() {
+        let r = op_resource_ratio(json!({"used": "512Mi", "total": "1Gi"})).unwrap();
+        assert_eq!(r["ratio"], json!(0.5));
+        assert_eq!(r["percent"], json!(50.0));
+        // CPU cross-unit: 250m of 1 core = 25%.
+        assert_eq!(
+            op_resource_ratio(json!({"used": "250m", "total": "1"})).unwrap()["percent"],
+            json!(25.0)
+        );
+        // Over-100% is reported faithfully (over-commit).
+        assert_eq!(
+            op_resource_ratio(json!({"used": "2Gi", "total": "1Gi"})).unwrap()["percent"],
+            json!(200.0)
+        );
+        // `a`/`b` aliases.
+        assert_eq!(
+            op_resource_ratio(json!({"a": "1Gi", "b": "4Gi"})).unwrap()["percent"],
+            json!(25.0)
+        );
+        // Errors: zero total, missing operand, bad unit.
+        assert!(op_resource_ratio(json!({"used": "1Gi", "total": "0"})).is_err());
+        assert!(op_resource_ratio(json!({"used": "1Gi"})).is_err());
+        assert!(op_resource_ratio(json!({"used": "1Xi", "total": "1Gi"})).is_err());
+    }
+
+    #[test]
+    fn pod_status_summarizes_readiness() {
+        let pod = json!({
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}],
+                "containerStatuses": [
+                    {"ready": true, "restartCount": 2},
+                    {"ready": false, "restartCount": 5},
+                ],
+            }
+        });
+        let s = op_pod_status(json!({ "pod": pod })).unwrap();
+        assert_eq!(s["phase"], json!("Running"));
+        assert_eq!(s["ready"], json!(true));
+        assert_eq!(s["ready_containers"], json!(1));
+        assert_eq!(s["total_containers"], json!(2));
+        assert_eq!(s["restarts"], json!(7));
+        // A pod with no containerStatuses yet (Pending) → zero counts, not ready.
+        let pending = op_pod_status(json!({"object": {"status": {"phase": "Pending"}}})).unwrap();
+        assert_eq!(pending["phase"], json!("Pending"));
+        assert_eq!(pending["ready"], json!(false));
+        assert_eq!(pending["total_containers"], json!(0));
+        assert_eq!(pending["restarts"], json!(0));
+        assert!(op_pod_status(json!({})).is_err());
+        assert!(op_pod_status(json!({"pod": "not-an-object"})).is_err());
+    }
+
+    /// A boolean flag that crossed the stryke FFI boundary may arrive as a real
+    /// JSON `true`, the string `"true"`, or the number `1` (stryke marshals a
+    /// hand-built boolean as the string/number forms). `is_truthy` must accept
+    /// all three so `pod_status`/`owner_refs` behave identically on synthetic and
+    /// live-cluster data — and reject everything else (string "false", 0, null).
+    #[test]
+    fn is_truthy_accepts_bool_string_and_number_forms() {
+        for v in [
+            json!(true),
+            json!("true"),
+            json!("True"),
+            json!(1),
+            json!(1.0),
+        ] {
+            assert!(is_truthy(&v), "{v} must read truthy");
+        }
+        for v in [
+            json!(false),
+            json!("false"),
+            json!(0),
+            json!(2),
+            json!(""),
+            Value::Null,
+        ] {
+            assert!(!is_truthy(&v), "{v} must read falsy");
+        }
+        // pod_status must count a container whose `ready` arrived as a STRING.
+        let pod = json!({"status": {"containerStatuses": [
+            {"ready": "true", "restartCount": 0},
+            {"ready": "false", "restartCount": 0},
+        ]}});
+        let s = op_pod_status(json!({ "pod": pod })).unwrap();
+        assert_eq!(
+            s["ready_containers"],
+            json!(1),
+            "string `\"true\"` ready flag must count as ready (FFI-marshaled bool)"
+        );
+    }
+
+    #[test]
+    fn owner_refs_extracts_and_flags_controller() {
+        let pod = json!({
+            "metadata": { "ownerReferences": [
+                {"kind": "ReplicaSet", "name": "web-abc", "uid": "u1", "controller": true},
+                {"kind": "Foo", "name": "bar", "uid": "u2"},
+            ]}
+        });
+        let o = op_owner_refs(json!({ "object": pod })).unwrap();
+        let owners = o["owners"].as_array().unwrap();
+        assert_eq!(owners.len(), 2);
+        assert_eq!(owners[0]["kind"], json!("ReplicaSet"));
+        assert_eq!(owners[0]["controller"], json!(true));
+        // A missing `controller` field reads as false, not null.
+        assert_eq!(owners[1]["controller"], json!(false));
+        assert_eq!(o["controller"]["name"], json!("web-abc"));
+        // No ownerReferences → empty list, null controller.
+        let none = op_owner_refs(json!({"object": {"metadata": {}}})).unwrap();
+        assert_eq!(none["owners"].as_array().unwrap().len(), 0);
+        assert_eq!(none["controller"], Value::Null);
+        // `pod` alias; error on a non-object.
+        assert!(op_owner_refs(json!({"pod": {"metadata": {}}})).is_ok());
+        assert!(op_owner_refs(json!({})).is_err());
+    }
+
+    #[test]
+    fn diff_merge_patch_produces_rfc7386_patch() {
+        let from = json!({
+            "metadata": {"labels": {"app": "web", "tier": "frontend"}},
+            "spec": {"replicas": 2, "paused": false},
+        });
+        let to = json!({
+            "metadata": {"labels": {"app": "web", "tier": "backend", "env": "prod"}},
+            "spec": {"replicas": 3},
+        });
+        let patch = op_diff_merge_patch(json!({"from": from, "to": to})).unwrap()["patch"].clone();
+        // Changed nested value, added nested key.
+        assert_eq!(patch["metadata"]["labels"]["tier"], json!("backend"));
+        assert_eq!(patch["metadata"]["labels"]["env"], json!("prod"));
+        // Unchanged nested key (app) is omitted.
+        assert!(patch["metadata"]["labels"].get("app").is_none());
+        // Changed scalar.
+        assert_eq!(patch["spec"]["replicas"], json!(3));
+        // Removed key → explicit null.
+        assert_eq!(patch["spec"]["paused"], json!(null));
+        // Identical objects → empty patch.
+        let empty =
+            op_diff_merge_patch(json!({"from": from, "to": from})).unwrap()["patch"].clone();
+        assert_eq!(empty, json!({}));
+        // Applying the patch to `from` reproduces `to` (merge semantics check on
+        // the changed branch): the patch's spec must drop the removed `paused`.
+        assert_eq!(patch["spec"].as_object().unwrap().len(), 2);
+        assert!(op_diff_merge_patch(json!({"from": from})).is_err());
+        assert!(op_diff_merge_patch(json!({"to": to})).is_err());
+        assert!(op_diff_merge_patch(json!({"from": 1, "to": 2})).is_err());
+    }
+
+    #[test]
+    fn drain_filter_applies_kubectl_eligibility_rules() {
+        let pods = json!([
+            {"metadata": {"name": "web-1", "namespace": "default"}, "status": {"phase": "Running"}},
+            {"metadata": {"name": "kube-proxy-x", "namespace": "kube-system",
+                "ownerReferences": [{"kind": "DaemonSet", "name": "kube-proxy"}]},
+                "status": {"phase": "Running"}},
+            {"metadata": {"name": "static-pod", "namespace": "kube-system",
+                "annotations": {"kubernetes.io/config.mirror": "abc"}},
+                "status": {"phase": "Running"}},
+            {"metadata": {"name": "job-done", "namespace": "default"}, "status": {"phase": "Succeeded"}},
+        ]);
+        let r = op_drain_filter(json!({ "pods": pods })).unwrap();
+        let evictable = r["evictable"].as_array().unwrap();
+        let skipped = r["skipped"].as_array().unwrap();
+        assert_eq!(
+            evictable.len(),
+            1,
+            "only the plain Running pod is evictable"
+        );
+        assert_eq!(evictable[0]["name"], json!("web-1"));
+        assert_eq!(skipped.len(), 3);
+        // Each skip carries its reason (order matches input).
+        assert_eq!(skipped[0]["reason"], json!("DaemonSet-managed"));
+        assert_eq!(skipped[1]["reason"], json!("mirror pod"));
+        assert_eq!(skipped[2]["reason"], json!("already terminated"));
+        // Empty list → both empty.
+        let e = op_drain_filter(json!({"pods": []})).unwrap();
+        assert_eq!(e["evictable"].as_array().unwrap().len(), 0);
+        assert_eq!(e["skipped"].as_array().unwrap().len(), 0);
+        assert!(op_drain_filter(json!({})).is_err());
+    }
+
+    #[test]
+    fn node_roles_reads_role_labels() {
+        let node = json!({"metadata": {"labels": {
+            "node-role.kubernetes.io/control-plane": "",
+            "node-role.kubernetes.io/master": "",
+            "kubernetes.io/hostname": "node1",
+        }}});
+        assert_eq!(node_roles(&node), vec!["control-plane", "master"]);
+        // Unlabelled node → the <none> sentinel kubectl shows.
+        assert_eq!(node_roles(&json!({"metadata": {}})), vec!["<none>"]);
     }
 }

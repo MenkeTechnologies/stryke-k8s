@@ -134,7 +134,7 @@ K8s::delete_resource "namespace", "ci"
 ```
 
 > `K8s::logs_follow`, `K8s::watch`, and `K8s::exec` are deferred in the
-> v0.2.x cdylib — they die until the callback FFI ships (see
+> v0.2.0 cdylib — they die until the callback FFI ships (see
 > [\[0x05\] FFI layer](#0x05-ffi-layer)).
 
 Per-call connection overrides on every public fn:
@@ -209,8 +209,11 @@ example.com/v1/Widget
 K8s::get           $kind, %opts → @objects     # opts: namespace, label_selector,
                                                # field_selector, limit
 K8s::get_one       $kind, $name, %opts → \%doc | undef
-K8s::watch         $kind, %opts → $count       # deferred in v0.2.x — dies
+K8s::get_yaml      $kind, $name, %opts → $yaml      # one resource as a YAML manifest string
+K8s::exists        $kind, $name, %opts → 1 | 0      # presence probe, no object body fetched
+K8s::watch         $kind, %opts → $count       # deferred in v0.2.0 — dies
 K8s::namespaces    %opts → @{ {name, status, labels} }
+K8s::nodes         %opts → @{ {name, ready, schedulable, roles, version} }   # `kubectl get nodes` columns
 K8s::api_resources %opts → @{ {group, version, kind, plural, namespaced, verbs} }
 ```
 
@@ -228,6 +231,7 @@ K8s::create            \%doc, %opts → \%created
 K8s::replace           \%doc, %opts → \%replaced
 K8s::patch             $kind, $name, \%patch, %opts → \%patched   # opts: type (merge|strategic), namespace
 K8s::delete_resource   $kind, $name, %opts → \%result   # opts: namespace
+K8s::delete_collection $kind, %opts → { deleted, pending }   # delete all matching a selector; opts: label_selector, field_selector, namespace
 K8s::scale             $kind, $name, $replicas, %opts → \%scale
 ```
 
@@ -263,14 +267,23 @@ K8s::selector_matches(\%labels, $selector) → bool                 # does a lab
 K8s::field_selector_matches(\%fields, $selector) → bool           # does a field map satisfy a FIELD selector? (=, ==, != only; absent field compares as empty string; ANDed)
 K8s::parse_resource_ref($ref)   → { kind, name }                  # kind/name
 K8s::build_resource_ref($kind, $name?) → { ref, kind, name }      # inverse: deployment + web → deployment/web; bare kind when no name
+K8s::parse_gvk($gvk)            → { gvk, group, version, kind, core }  # apps/v1/Deployment, v1/Pod, or bare Pod
+K8s::build_gvk($kind, $version?, $group?) → { gvk, group, version, kind, core }  # inverse of parse_gvk; a group requires a version
 K8s::parse_api_version($apiVersion) → { api_version, group, version, core }  # v1 → core group; apps/v1 → group=apps, version=v1
 K8s::build_api_version($group, $version) → { api_version, group, version, core }  # inverse: ("","v1")→v1; ("apps","v1")→apps/v1
+K8s::parse_image_ref($image)    → { image, registry, repository, tag, digest }  # registry only when host-like (dot/colon/localhost); nginx:1.27 → no registry
+K8s::build_image_ref($repo, %opts) → { image, registry, repository, tag, digest }  # inverse; opts: registry, tag, digest
 K8s::parse_quantity($qty)       → { quantity, number, suffix, value }  # 100Mi→bytes, 500m→0.5 cores
 K8s::format_quantity($value, $suffix?) → { quantity, number, suffix, value }  # bytes→100Mi; inverse of parse_quantity
 K8s::compare_quantity($a, $b)   → { a, b, a_value, b_value, cmp }  # order quantities across units (1Gi vs 1024Mi); cmp -1/0/1
 K8s::sum_quantities(@quantities) → { count, value, quantity }  # total a list across units (container memory requests); 100Mi+256Mi+128Mi→484Mi
 K8s::sub_quantity($a, $b, $suffix?) → { quantity, number, suffix, value, negative }  # pairwise a-b headroom (allocatable-requested, limit-used); 8Gi-2Gi→6Gi; negative (over-allocation) reported, not clamped
 K8s::scale_quantity($quantity, $factor, $suffix?) → { quantity, number, suffix, value, factor }  # multiply by a scalar (replicas × per-pod request); 256Mi×3→768Mi, keeps the unit
+K8s::resource_ratio($used, $total) → { used, total, used_value, total_value, ratio, percent }  # utilization across units; 512Mi of 1Gi → 50%
+K8s::pod_status($pod)           → { phase, ready, ready_containers, total_containers, restarts }  # readiness summary from a Pod object (kubectl PHASE/READY columns)
+K8s::owner_refs($object)        → { owners, controller }          # metadata.ownerReferences as {kind,name,uid,controller}; controller is the owning controller or undef
+K8s::diff_merge_patch($from, $to) → \%patch                       # RFC 7386 merge patch turning $from into $to (removed keys → null); the body K8s::patch(type=>"merge") needs
+K8s::drain_filter(@pods)        → { evictable, skipped }          # classify Pod objects for a node drain (skips mirror/DaemonSet/terminated); kubectl drain eligibility rules
 ```
 
 `parse_quantity` resolves a resource quantity to its base-unit `value`:
@@ -281,9 +294,11 @@ suffixes (`n`/`u`/`m`/`k`/`M`/`G`/`T`/`P`/`E`) powers of 1000 — so `100Mi`
 ### Nodes + eviction
 
 ```stryke
+K8s::nodes     %opts → @{ {name, ready, schedulable, roles, version} }   # node status summary
 K8s::cordon    $name, %opts → \%node       # spec.unschedulable = true
 K8s::uncordon  $name, %opts → \%node       # spec.unschedulable = false
 K8s::evict     $name, %opts → \%result     # graceful pod eviction; namespace required
+K8s::drain_filter(@pods) → { evictable, skipped }   # pure: which pods a drain would evict
 ```
 
 ### Events + metrics + wait
@@ -300,9 +315,9 @@ K8s::wait      $kind, $name, %opts → \%ok  # opts: condition (default Ready, o
 
 ```stryke
 K8s::logs          $pod, %opts → $text       # opts: namespace, container, tail
-K8s::logs_follow   $pod, %opts → $count      # deferred in v0.2.x — dies
+K8s::logs_follow   $pod, %opts → $count      # deferred in v0.2.0 — dies
 K8s::exec          $pod, \@cmd, %opts → $count
-                                             # deferred in v0.2.x — dies
+                                             # deferred in v0.2.0 — dies
 ```
 
 ### Connection + plumbing
@@ -321,11 +336,13 @@ Each `K8s::*` wrapper builds a JSON args dict and calls a sibling
 `k8s__*` symbol resolved out of `libstryke_k8s.{dylib,so}`. The cdylib
 is dlopened in-process on first `use K8s` (via stryke's
 `pkg::commands::try_load_ffi_for` resolver hook). Its exports cover
-version/discovery, get/list, write paths (create / replace / apply / delete
-/ scale / patch), rollouts (set_image / rollout_restart / rollout_status /
-label / annotate), node scheduling (cordon / uncordon / evict), events,
+version/discovery, get/list (get / get_one / get_yaml / exists / nodes), write
+paths (create / replace / apply / delete / delete_collection / scale / patch),
+rollouts (set_image / rollout_restart / rollout_status /
+rollout_history / autoscale / label / annotate), node scheduling (cordon /
+uncordon / taint / untaint / evict), events,
 metrics (top_pods / top_nodes), wait, snapshot logs, plus cluster-free
-helpers (valid_name / valid_label_value / valid_label_key / parse_selector / build_selector / parse_field_selector / build_field_selector / selector_matches / field_selector_matches / parse_resource_ref / build_resource_ref / parse_api_version / build_api_version / parse_quantity / format_quantity / compare_quantity / sum_quantities / scale_quantity). The
+helpers (valid_name / valid_label_value / valid_label_key / parse_selector / build_selector / parse_field_selector / build_field_selector / selector_matches / field_selector_matches / parse_resource_ref / build_resource_ref / parse_gvk / build_gvk / parse_api_version / build_api_version / parse_image_ref / build_image_ref / parse_quantity / format_quantity / compare_quantity / sum_quantities / sub_quantity / scale_quantity / resource_ratio / pod_status / owner_refs / diff_merge_patch / drain_filter). The
 authoritative list is `[ffi].exports` in `stryke.toml`.
 
 **Persistent state:**
@@ -336,7 +353,7 @@ authoritative list is `[ffi].exports` in `stryke.toml`.
   helper rebuilt the client (TLS+auth handshake) per fork; this reuses
   the same client + underlying HTTP pool across calls.
 
-**Deferred from v0.2.1:** streaming-only ops (`watch`, `logs --follow`,
+**Deferred from v0.2.0:** streaming-only ops (`watch`, `logs --follow`,
 `exec`). These need a callback FFI shape that v1's `FfiSig::StrToStr`
 doesn't model. Calling them dies with a clear message.
 

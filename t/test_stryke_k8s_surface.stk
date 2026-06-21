@@ -77,4 +77,19 @@ assert_ok exists &K8s::sum_quantities, "K8s::sum_quantities exists"
 assert_ok exists &K8s::sub_quantity, "K8s::sub_quantity exists"
 assert_ok exists &K8s::scale_quantity, "K8s::scale_quantity exists"
 
+# ── K8s.stk new ops (live + pure helpers) ─────────────────
+assert_ok exists &K8s::get_yaml, "K8s::get_yaml exists"
+assert_ok exists &K8s::exists, "K8s::exists exists"
+assert_ok exists &K8s::nodes, "K8s::nodes exists"
+assert_ok exists &K8s::delete_collection, "K8s::delete_collection exists"
+assert_ok exists &K8s::parse_gvk, "K8s::parse_gvk exists"
+assert_ok exists &K8s::build_gvk, "K8s::build_gvk exists"
+assert_ok exists &K8s::parse_image_ref, "K8s::parse_image_ref exists"
+assert_ok exists &K8s::build_image_ref, "K8s::build_image_ref exists"
+assert_ok exists &K8s::resource_ratio, "K8s::resource_ratio exists"
+assert_ok exists &K8s::pod_status, "K8s::pod_status exists"
+assert_ok exists &K8s::owner_refs, "K8s::owner_refs exists"
+assert_ok exists &K8s::diff_merge_patch, "K8s::diff_merge_patch exists"
+assert_ok exists &K8s::drain_filter, "K8s::drain_filter exists"
+
 test_run
