@@ -127,7 +127,7 @@ K8s::watch "pods",
 # Exec inside a container.
 K8s::exec "echo-7d9f", ["sh", "-c", "uptime"],
     namespace => "ci",
-    callback  => fn ($stream, $data) { print $data }
+    callback  => fn ($stream, $data) { p $data }
 
 # Delete (cascading on Namespace).
 K8s::delete_resource "namespace", "ci"
