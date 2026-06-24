@@ -22,6 +22,8 @@ minikube, EKS, GKE, AKS, OpenShift, vanilla). Opt-in package tier.
 
 ### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-docker`](https://github.com/MenkeTechnologies/stryke-docker) · [`stryke-aws`](https://github.com/MenkeTechnologies/stryke-aws) · [`stryke-gcp`](https://github.com/MenkeTechnologies/stryke-gcp) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
+### [`Read the Docs`](https://menketechnologies.github.io/stryke-k8s/) &middot; [`Engineering Report`](https://menketechnologies.github.io/stryke-k8s/report.html)
+
 ---
 
 ## Table of Contents
