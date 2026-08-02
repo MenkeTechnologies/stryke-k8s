@@ -30,14 +30,13 @@ minikube, EKS, GKE, AKS, OpenShift, vanilla). Opt-in package tier.
 
 - [\[0x00\] Install](#0x00-install)
 - [\[0x01\] Quick start](#0x01-quick-start)
-- [\[0x02\] CLI: `k8s`](#0x02-cli-k8s)
-- [\[0x03\] GVK shortcuts](#0x03-gvk-shortcuts)
-- [\[0x04\] API reference](#0x04-api-reference)
-- [\[0x05\] FFI layer](#0x05-ffi-layer)
-- [\[0x06\] Tests](#0x06-tests)
-- [\[0x07\] Dev workflow](#0x07-dev-workflow)
-- [\[0x08\] Layout](#0x08-layout)
-- [\[0x09\] Roadmap](#0x09-roadmap)
+- [\[0x02\] GVK shortcuts](#0x02-gvk-shortcuts)
+- [\[0x03\] API reference](#0x03-api-reference)
+- [\[0x04\] FFI layer](#0x04-ffi-layer)
+- [\[0x05\] Tests](#0x05-tests)
+- [\[0x06\] Dev workflow](#0x06-dev-workflow)
+- [\[0x07\] Layout](#0x07-layout)
+- [\[0x08\] Roadmap](#0x08-roadmap)
 - [\[0xFF\] License](#0xff-license)
 
 ---
@@ -137,7 +136,7 @@ K8s::delete_resource "namespace", "ci"
 
 > `K8s::logs_follow`, `K8s::watch`, and `K8s::exec` are deferred in the
 > v0.2.0 cdylib — they die until the callback FFI ships (see
-> [\[0x05\] FFI layer](#0x05-ffi-layer)).
+> [\[0x04\] FFI layer](#0x04-ffi-layer)).
 
 Per-call connection overrides on every public fn:
 
@@ -146,42 +145,7 @@ val %prod = (context => "prod-eks")
 K8s::get "pods", namespace => "payments", %prod
 ```
 
-## [0x02] CLI: `k8s`
-
-```sh
-k8s get pods --namespace=default
-k8s get svc -A
-k8s get apps/v1/Deployment --namespace=kube-system
-
-k8s get-one pod echo-7d9f --namespace=default
-k8s apply --doc='{"apiVersion":"v1","kind":"ConfigMap",...}'
-k8s delete deploy echo --namespace=ci --force
-k8s scale  deploy echo --replicas=5 --namespace=ci
-
-k8s logs   echo-7d9f --namespace=ci --tail=100
-k8s logs   echo-7d9f --namespace=ci --follow --timestamps
-k8s watch  pods --namespace=ci --label-selector=app=echo
-k8s exec   echo-7d9f --namespace=ci --cmd sh -- -c "uptime"
-
-k8s version
-k8s ping
-k8s contexts
-k8s current-context
-k8s api-resources
-k8s namespaces
-
-k8s build           # cargo build --release
-```
-
-Global flags (also env vars):
-
-```
---context CTX               $KUBE_CONTEXT       kubeconfig context to use
---kubeconfig PATH           $KUBECONFIG         explicit kubeconfig file
---default-namespace NS      $KUBE_NAMESPACE     default if --namespace omitted
-```
-
-## [0x03] GVK shortcuts
+## [0x02] GVK shortcuts
 
 Anywhere a `kind` is accepted, the helper resolves the input against the
 cluster's discovery API. All of the following work for Pods:
@@ -203,7 +167,7 @@ Custom resources work the same way once installed:
 example.com/v1/Widget
 ```
 
-## [0x04] API reference
+## [0x03] API reference
 
 ### Read paths
 
@@ -339,7 +303,7 @@ K8s::raw              $path, %opts → { path, method, status, body, json }  # r
 K8s::pkg_version()    → $version_string    # cdylib's CARGO_PKG_VERSION
 ```
 
-## [0x05] FFI layer
+## [0x04] FFI layer
 
 Each `K8s::*` wrapper builds a JSON args dict and calls a sibling
 `k8s__*` symbol resolved out of `libstryke_k8s.{dylib,so}`. The cdylib
@@ -381,7 +345,7 @@ Output:
 
 </details>
 
-## [0x06] Tests
+## [0x05] Tests
 
 ```sh
 cargo test                                   # compiles, no live cluster
@@ -401,7 +365,7 @@ docker run --rm --name k3s -p 6443:6443 \
     server --disable=traefik --tls-san=127.0.0.1
 ```
 
-## [0x07] Dev workflow
+## [0x06] Dev workflow
 
 ```sh
 make             # release build
@@ -411,7 +375,7 @@ make install
 make clean
 ```
 
-## [0x08] Layout
+## [0x07] Layout
 
 ```
 stryke-k8s/
@@ -435,7 +399,7 @@ stryke-k8s/
     release.yml                    # cross-compile + GH release on tag push
 ```
 
-## [0x09] Roadmap
+## [0x08] Roadmap
 
 | v1 (helper era) | v2+ |
 |---|---|
