@@ -380,7 +380,7 @@ make clean
 ```
 stryke-k8s/
   stryke.toml                      # stryke package manifest
-  Cargo.toml                       # Rust helper crate manifest
+  Cargo.toml                       # cdylib crate manifest
   Makefile
   src/lib.rs                       # single-file cdylib
   lib/
@@ -395,7 +395,7 @@ stryke-k8s/
     cluster_info.stk
     discover.stk
   .github/workflows/
-    ci.yml                         # kind cluster + live round-trip
+    ci.yml                         # check/fmt/clippy/test/doc, release builds, lint gates
     release.yml                    # cross-compile + GH release on tag push
 ```
 
