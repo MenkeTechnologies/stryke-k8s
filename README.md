@@ -16,8 +16,8 @@
 
 > *"Any kubeconfig-reachable cluster, no kubectl."*
 
-Kubernetes client for stryke. Get / apply / delete / scale / logs /
-watch / exec against any kubeconfig-reachable cluster (kind, k3s,
+Kubernetes client for stryke. Get / apply / delete / scale / logs
+against any kubeconfig-reachable cluster (kind, k3s,
 minikube, EKS, GKE, AKS, OpenShift, vanilla). Opt-in package tier.
 
 ### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-docker`](https://github.com/MenkeTechnologies/stryke-docker) · [`stryke-aws`](https://github.com/MenkeTechnologies/stryke-aws) · [`stryke-gcp`](https://github.com/MenkeTechnologies/stryke-gcp) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
@@ -112,30 +112,12 @@ K8s::scale "deploy", "echo", 5, namespace => "ci"
 # Logs (buffered).
 val $text = K8s::logs "echo-7d9f", namespace => "ci", tail => 100
 
-# Logs (streaming).
-K8s::logs_follow "echo-7d9f",
-    namespace => "ci",
-    callback  => fn ($line) { p $line }
-
-# Watch — NDJSON of `{type, object}` events, one per change.
-K8s::watch "pods",
-    namespace => "ci",
-    callback  => fn ($evt) {
-        return unless defined $evt->{object}
-        p "$evt->{type} $evt->{object}{metadata}{name}"
-    }
-
-# Exec inside a container.
-K8s::exec "echo-7d9f", ["sh", "-c", "uptime"],
-    namespace => "ci",
-    callback  => fn ($stream, $data) { p $data }
-
 # Delete (cascading on Namespace).
 K8s::delete_resource "namespace", "ci"
 ```
 
 > `K8s::logs_follow`, `K8s::watch`, and `K8s::exec` are deferred in the
-> v0.2.0 cdylib — they die until the callback FFI ships (see
+> current cdylib — they die until the callback FFI ships (see
 > [\[0x04\] FFI layer](#0x04-ffi-layer)).
 
 Per-call connection overrides on every public fn:
@@ -177,7 +159,7 @@ K8s::get           $kind, %opts → @objects     # opts: namespace, label_select
 K8s::get_one       $kind, $name, %opts → \%doc | undef
 K8s::get_yaml      $kind, $name, %opts → $yaml      # one resource as a YAML manifest string
 K8s::exists        $kind, $name, %opts → 1 | 0      # presence probe, no object body fetched
-K8s::watch         $kind, %opts → $count       # deferred in v0.2.0 — dies
+K8s::watch         $kind, %opts → $count       # deferred — dies
 K8s::namespaces    %opts → @{ {name, status, labels} }
 K8s::nodes         %opts → @{ {name, ready, schedulable, roles, version} }   # `kubectl get nodes` columns
 K8s::api_resources %opts → @{ {group, version, kind, plural, namespaced, verbs} }
@@ -286,9 +268,9 @@ K8s::wait      $kind, $name, %opts → \%ok  # opts: condition (default Ready, o
 
 ```stryke
 K8s::logs          $pod, %opts → $text       # opts: namespace, container, tail
-K8s::logs_follow   $pod, %opts → $count      # deferred in v0.2.0 — dies
+K8s::logs_follow   $pod, %opts → $count      # deferred — dies
 K8s::exec          $pod, \@cmd, %opts → $count
-                                             # deferred in v0.2.0 — dies
+                                             # deferred — dies
 ```
 
 ### Connection + plumbing
@@ -313,7 +295,7 @@ version/discovery, get/list (get / get_one / get_yaml / exists / nodes), write
 paths (create / replace / apply / delete / delete_collection / scale / get_scale / patch),
 rollouts (set_image / rollout_restart / rollout_status /
 rollout_history / autoscale / label / annotate), node scheduling (cordon /
-uncordon / taint / untaint / evict), events,
+uncordon / taint / evict), events,
 metrics (top_pods / top_nodes), wait, snapshot logs, raw HTTP (raw / healthz),
 plus cluster-free
 helpers (valid_name / valid_label_value / valid_label_key / parse_selector / build_selector / parse_field_selector / build_field_selector / selector_matches / field_selector_matches / parse_resource_ref / build_resource_ref / parse_gvk / build_gvk / parse_api_version / build_api_version / parse_image_ref / build_image_ref / parse_quantity / format_quantity / normalize_quantity / compare_quantity / sum_quantities / sub_quantity / scale_quantity / resource_ratio / pod_status / container_images / condition / age_seconds / owner_refs / diff_merge_patch / drain_filter). The
@@ -327,7 +309,7 @@ authoritative list is `[ffi].exports` in `stryke.toml`.
   helper rebuilt the client (TLS+auth handshake) per fork; this reuses
   the same client + underlying HTTP pool across calls.
 
-**Deferred from v0.2.0:** streaming-only ops (`watch`, `logs --follow`,
+**Deferred:** streaming-only ops (`watch`, `logs --follow`,
 `exec`). These need a callback FFI shape that v1's `FfiSig::StrToStr`
 doesn't model. Calling them dies with a clear message.
 
@@ -401,14 +383,13 @@ stryke-k8s/
 
 ## [0x08] Roadmap
 
-| v1 (helper era) | v2+ |
+| Today (helper era) | Future |
 |---|---|
 | Generic dynamic resources via discovery | Typed wrappers for top-N kinds (zero-alloc Pod/Deployment/Service) |
 | Server-side apply | `kubectl diff` equivalent (dry-run + server-side three-way) |
-| Logs (buffered + streaming) | Port-forward (TCP tunnel) |
-| Exec (stdout/stderr stream) | Stdin attach + interactive TTY |
-| Watch via kube `watcher` | Informer-style cache with resync |
-| kubeconfig + in-cluster SA | OIDC / EKS-token / GKE-gcloud exec plugins parity |
+| Logs (buffered) | Streaming logs (`--follow`) once callback FFI ships |
+| Exec / watch surface defined (deferred) | Stdin attach + interactive TTY; informer-style cache with resync |
+| kubeconfig + in-cluster SA | OIDC / EKS-token / GKE-gcloud exec plugins parity; port-forward (TCP tunnel) |
 
 ## [0xFF] License
 
